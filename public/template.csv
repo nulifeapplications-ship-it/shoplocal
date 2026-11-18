@@ -1,0 +1,3 @@
+code,name,category,description,price,unit,pack,hidden,soldout
+MANGO,Mango,produce,Fresh mango,100,lb,,false,false
+BOX,Seasonal fruit box,produce,Mixed fruit,650,package,3 kg,false,false
