@@ -37,5 +37,5 @@ export default {fetch(request,env) {return worker.fetch(request,{...env,ASSETS:a
 writeFileSync('dist/server/index.js',drafts+'\n'+implementation+'\n'+handler);
 writeFileSync('dist/server/wrangler.json',JSON.stringify({
   name:'nulife-market',main:'index.js',compatibility_date:'2026-01-01',
-  d1_databases:[{binding:'DB',database_name:'nulife-market',database_id:manifest.project_id,migrations_dir:'../../drizzle'}]
+  d1_databases:[{binding:'DB',database_name:'nulife-market',database_id:manifest.project_id,migrations_dir:'../migrations'}]
 },null,2));

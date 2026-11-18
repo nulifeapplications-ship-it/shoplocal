@@ -39,6 +39,8 @@ test('marketplace and portals enforce the complete ordering workflow',async t=>{
   await guest('/manifest.webmanifest',undefined);
   await guest('/template.csv',undefined);
   await guest('/api/admin/stores',undefined,401);
+  const crossOrigin=await fetch(origin+'/api/login',{method:'POST',headers:{origin:'https://elsewhere.example','Content-Type':'application/json'},body:'{}'});
+  assert.equal(crossOrigin.status,403);
   await admin('/api/setup',{email:'admin@example.test',password,key:'test-bootstrap-key'});
   await admin('/api/setup',{email:'second@example.test',password,key:'test-bootstrap-key'},409);
   await admin('/api/login',{email:'admin@example.test',password:'wrong'},401);

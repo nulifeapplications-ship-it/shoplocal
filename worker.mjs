@@ -207,10 +207,15 @@ function validDelivery(day,time) {
 async function api(req,env,path) {
   const db=env.DB;
   const method=req.method;
-  if(method==='POST' && req.headers.get('sec-fetch-site')==='cross-site') fail('forbidden',403);
+  const url=new URL(req.url);
+  if(method==='POST') {
+    const origin=req.headers.get('origin');
+    if((origin&&origin!==url.origin)||req.headers.get('sec-fetch-site')==='cross-site') fail('forbidden',403);
+    if(req.headers.get('content-type')?.split(';',1)[0].trim().toLowerCase()!=='application/json') fail('invalid',415);
+  }
   const user=await actor(req,db);
   const p=async()=>payload(req);
-  const params=new URL(req.url).searchParams;
+  const params=url.searchParams;
 
   if(method==='GET'&&path==='/api/config') return json({preview:env.PREVIEW==='1'});
   if(method==='GET'&&path==='/api/stores') {
