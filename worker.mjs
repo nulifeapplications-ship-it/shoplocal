@@ -1,4 +1,5 @@
 import drafts from "./draft-data.mjs";
+import { pushConfigured, validPushEndpoint, validPushKeys, sendPush } from "./push.mjs";
 const utf8 = new TextEncoder();
 const statuses = {new:['confirmed','declined'],confirmed:['preparing','out_for_delivery','delivered'],preparing:['out_for_delivery','delivered'],out_for_delivery:['delivered'],declined:[],delivered:[]};
 const id = () => crypto.randomUUID();
@@ -230,7 +231,99 @@ function validDelivery(day,time) {
   return Number.isFinite(date.valueOf()) && new Date(date.valueOf()-4*3600000).toISOString().slice(0,10)===day && date.valueOf()>Date.now()-5*60000;
 }
 
-async function api(req,env,path) {
+async function deliverOrderAlerts(env,origin) {
+  const {DB:db}=env, now=Date.now(), lease=now+30000;
+  await run(db,`DELETE FROM order_alerts WHERE id IN (
+    SELECT alerts.id FROM order_alerts AS alerts JOIN orders ON orders.id=alerts.order_id
+    JOIN push_subscriptions AS subscriptions ON subscriptions.endpoint=alerts.endpoint
+    WHERE orders.status<>'new' OR orders.created<? OR subscriptions.user_id<>alerts.user_id LIMIT 100
+  )`,now-86400000);
+  const claimed=await all(db,`UPDATE order_alerts SET next_at=?,attempts=attempts+1 WHERE id IN (
+    SELECT alerts.id FROM order_alerts AS alerts JOIN orders ON orders.id=alerts.order_id
+    JOIN push_subscriptions AS subscriptions ON subscriptions.endpoint=alerts.endpoint AND subscriptions.user_id=alerts.user_id
+    JOIN users ON users.id=alerts.user_id AND users.demo=0
+    WHERE alerts.next_at<=? AND orders.status='new' AND orders.created>=? ORDER BY alerts.next_at,alerts.id LIMIT 8
+  ) RETURNING id`,lease,now,now-86400000);
+  if(!claimed.length) return;
+  const alerts=await all(db,`SELECT alerts.id AS alert_id,alerts.attempts,alerts.order_id,subscriptions.endpoint,
+    subscriptions.user_id,subscriptions.p256dh,subscriptions.auth,subscriptions.language,users.role
+    FROM order_alerts AS alerts
+    JOIN push_subscriptions AS subscriptions ON subscriptions.endpoint=alerts.endpoint AND subscriptions.user_id=alerts.user_id
+    JOIN users ON users.id=alerts.user_id
+    JOIN orders ON orders.id=alerts.order_id AND orders.status='new'
+    WHERE alerts.id IN (${claimed.map(()=>'?').join(',')}) AND alerts.next_at=?`,...claimed.map(row=>row.id),lease);
+  await Promise.all(alerts.map(async alert=>{
+    let result=await sendPush(env,origin,alert,{role:alert.role,id:alert.order_id});
+    // Retry an initial transient failure immediately while the checkout Worker is still active.
+    if(result.temporary && !result.delay && alert.attempts===1) {
+      await new Promise(resolve=>setTimeout(resolve,1000));
+      result=await sendPush(env,origin,alert,{role:alert.role,id:alert.order_id});
+    }
+    if(result.expired) {
+      await run(db,'DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND p256dh=?',alert.endpoint,alert.user_id,alert.p256dh);
+    } else if(result.sent || alert.attempts>=5) {
+      await run(db,'DELETE FROM order_alerts WHERE id=? AND next_at=?',alert.alert_id,lease);
+    } else {
+      const backoff=30000*2**(alert.attempts-1);
+      await run(db,'UPDATE order_alerts SET next_at=? WHERE id=? AND next_at=?',
+        Date.now()+Math.min(3600000,Math.max(backoff,result.delay||0)),alert.alert_id,lease);
+    }
+  }));
+}
+async function dispatchOrderAlerts(env,origin,ctx) {
+  if(!pushConfigured(env)) return;
+  const work=deliverOrderAlerts(env,origin).catch(()=>console.error('NuLife order alert dispatch failed'));
+  if(ctx) ctx.waitUntil(work);
+  else await work;
+}
+
+async function notificationApi(req,env,url,user,ctx) {
+  role(user);
+  const db=env.DB, configured=pushConfigured(env);
+  if(req.method==='GET') {
+    const count=user.role==='admin'
+      ?await one(db,`SELECT count(*) AS pending FROM orders JOIN stores ON orders.store=stores.id
+        WHERE orders.nulife_managed=1 AND orders.status='new' AND stores.demo=0`)
+      :await one(db,"SELECT count(*) AS pending FROM orders WHERE store=? AND nulife_managed=0 AND status='new'",user.store);
+    await dispatchOrderAlerts(env,url.origin,ctx);
+    return json({publicKey:configured?env.PUSH_PUBLIC_KEY:'',pending:count.pending});
+  }
+  if(req.method!=='POST') fail('not_found',404);
+  const v=await payload(req);
+  if(!validPushEndpoint(v.endpoint)) fail('push_subscription');
+  if(v.action==='check') {
+    const enabled=await one(db,'SELECT 1 FROM push_subscriptions WHERE endpoint=? AND user_id=?',v.endpoint,user.id);
+    return json({enabled:Boolean(enabled)});
+  }
+  if(v.action==='disable') {
+    await run(db,'DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?',v.endpoint,user.id);
+    return json({ok:true});
+  }
+  if(!configured) fail('push_unavailable',503);
+  if(v.action==='enable') {
+    if(!validPushKeys(v.keys)) fail('push_subscription');
+    await run(db,`INSERT INTO push_subscriptions(endpoint,user_id,p256dh,auth,language) VALUES (?,?,?,?,?)
+      ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth,language=excluded.language`,
+      v.endpoint,user.id,v.keys.p256dh,v.keys.auth,v.language==='es'?'es':'en');
+    return json({ok:true});
+  }
+  if(v.action==='test') {
+    const now=Date.now();
+    const subscription=await one(db,`UPDATE push_subscriptions SET last_test=? WHERE endpoint=? AND user_id=? AND last_test<?
+      RETURNING endpoint,p256dh,auth,language`,now,v.endpoint,user.id,now-15000);
+    if(!subscription) fail('push_test_wait',409);
+    const result=await sendPush(env,url.origin,subscription,{role:user.role});
+    if(result.expired) {
+      await run(db,'DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=? AND p256dh=?',v.endpoint,user.id,subscription.p256dh);
+      fail('push_expired',409);
+    }
+    if(!result.sent) fail('push_delivery',502);
+    return json({ok:true});
+  }
+  fail('invalid');
+}
+
+async function api(req,env,path,ctx) {
   const db=env.DB;
   const method=req.method;
   const url=new URL(req.url);
@@ -257,6 +350,7 @@ async function api(req,env,path) {
     return json({store,products:await all(db,'SELECT '+publicProductColumns+' FROM products WHERE store=? AND hidden=0 AND paused=0 ORDER BY category,name',store.id)});
   }
   if(method==='GET'&&path==='/api/me') return json({user});
+  if(path==='/api/notifications') return notificationApi(req,env,url,user,ctx);
   if(method==='POST'&&path==='/api/setup') {
     const v=await p();
     if(!env.FIRST_ADMIN_KEY || typeof v.key!=='string' || !equal(v.key,env.FIRST_ADMIN_KEY)
@@ -328,6 +422,7 @@ async function api(req,env,path) {
     if(!/^[a-f0-9]{64}$/.test(t)) fail('not_found',404);
     const row=await one(db,joinedOrder+' WHERE orders.token=? AND '+visible,await digest(t));
     if(!row) fail('not_found',404);
+    await dispatchOrderAlerts(env,url.origin,ctx);
     return json({order:orderData(row,true)});
   }
   if(method==='POST'&&path==='/api/order') {
@@ -361,17 +456,30 @@ async function api(req,env,path) {
     const now=Date.now();
     // Verify the catalog and store again within the insert statement.
     const conditions=items.map(()=>"(id=? AND cents=? AND unit=? AND name=? AND pack=?)").join(' OR ');
-    const result=await run(db,`INSERT OR IGNORE INTO orders (id,number,token,store,guest,phone,property,room,delivery_date,delivery_time,notes,fee,items,created,updated,attempt,nulife_managed,managed_contact)
+    const orderID=id();
+    const insert=sql(db,`INSERT OR IGNORE INTO orders (id,number,token,store,guest,phone,property,room,delivery_date,delivery_time,notes,fee,items,created,updated,attempt,nulife_managed,managed_contact)
       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,nulife_managed,CASE WHEN nulife_managed=1 THEN managed_contact ELSE '' END
       FROM stores WHERE id=? AND fee IS ? AND ${checkout}
       AND (SELECT count(*) FROM products WHERE store=? AND hidden=0 AND paused=0 AND soldout=0 AND (${conditions}))=?`,
-      id(),number,await digest(privateLink),store.id,guest,phone,property,room,date,time,notes,store.fee,JSON.stringify(items),now,now,attemptHash,
+      orderID,number,await digest(privateLink),store.id,guest,phone,property,room,date,time,notes,store.fee,JSON.stringify(items),now,now,attemptHash,
       store.id,store.fee,store.id,...items.flatMap(x=>[x.id,x.cents,x.unit,x.name,x.pack]),items.length);
+    // Save the notification jobs in the same transaction as the order.
+    const enqueue=sql(db,`INSERT INTO order_alerts (order_id,endpoint,user_id,next_at)
+      SELECT orders.id,subscriptions.endpoint,users.id,orders.created
+      FROM orders JOIN stores ON stores.id=orders.store AND stores.demo=0
+      JOIN users ON users.demo=0 AND (
+        (orders.nulife_managed=1 AND users.role='admin')
+        OR (orders.nulife_managed=0 AND users.role='vendor' AND users.store=orders.store)
+      )
+      JOIN push_subscriptions AS subscriptions ON subscriptions.user_id=users.id
+      WHERE orders.id=?`,orderID);
+    const [result]=await db.batch([insert,enqueue]);
     if(result.meta.changes!==1) {
       const existing=await one(db,'SELECT orders.number FROM orders JOIN stores ON stores.id=orders.store WHERE orders.attempt=? AND '+visible,attemptHash);
       if(existing) return json({number:existing.number,token:privateLink,repeated:true});
       fail('unavailable',409);
     }
+    await dispatchOrderAlerts(env,url.origin,ctx);
     return json({number,token:privateLink},201);
   }
 
@@ -528,10 +636,10 @@ async function serveMedia(request,env,path) {
   return new Response(new Uint8Array(file.data),{headers:{...headers,'Content-Type':found.mime,'Content-Security-Policy':"default-src 'none'; sandbox"}});
 }
 export default {
-  async fetch(request,env) {
+  async fetch(request,env,ctx) {
     const url=new URL(request.url), path=url.pathname;
     try {
-      if(path.startsWith('/api/')) return await api(request,env,path);
+      if(path.startsWith('/api/')) return await api(request,env,path,ctx);
       if(path.startsWith('/media/')) return await serveMedia(request,env,path);
       if(path.startsWith('/draft-assets/')) fail('not_found',404);
       const entry=path==='/'||/^\/(store|invite|order)\/[^/]+\/?$/.test(path)||['/cart','/login','/setup','/vendor','/admin'].includes(path);

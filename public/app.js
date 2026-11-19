@@ -80,6 +80,11 @@ function errorText(error) {
     delivery_date:L('Choose a future delivery date and time in the Dominican Republic.','Elige una fecha y hora de entrega futuras en República Dominicana.'),
     status_change:L('This status change is unavailable. Reload the order and try again.','No se puede cambiar el estado. Actualiza el pedido e inténtalo de nuevo.'),
     weight_required:L('Save the final weight of each item sold by the pound before completing delivery.','Guarda el peso final de cada producto vendido por libra antes de completar la entrega.'),
+    push_unavailable:L('Device alerts are unavailable right now.','Los avisos del dispositivo no están disponibles ahora.'),
+    push_subscription:L('This device could not be registered for alerts.','No se pudo registrar este dispositivo para recibir avisos.'),
+    push_test_wait:L('Wait a few seconds before sending another test.','Espera unos segundos antes de enviar otra prueba.'),
+    push_expired:L('Turn notifications on again for this device.','Vuelve a activar las notificaciones en este dispositivo.'),
+    push_delivery:L('The test alert could not be sent. Try again shortly.','No se pudo enviar la prueba. Inténtalo de nuevo en unos momentos.'),
     network:L('Connection interrupted. Please try again.','Se interrumpió la conexión. Inténtalo de nuevo.'),
     server_error:L('Something went wrong. Please try again.','Ocurrió un error. Inténtalo de nuevo.')
   };
@@ -134,7 +139,10 @@ function shareBox(url,send=false) {
 let cart;
 try {cart=JSON.parse(localStorage.getItem('nulife-cart')||'null');} catch {cart=null;}
 if(!cart || !Array.isArray(cart.items)) cart={items:[]};
-let appUser=null, refreshTimer, filter='all', query='';
+let appUser=null, refreshTimer, notificationPoll, filter='all', query='';
+const serviceRegistration='serviceWorker' in navigator&&window.isSecureContext
+  ?navigator.serviceWorker.register('/sw.js').catch(()=>null)
+  :Promise.resolve(null);
 let screenEdit='', activeProduct=null, csvFile='', orderPage=0;
 const segments=()=>location.pathname.replace(/\/$/,'').split('/');
 function persistCart() {localStorage.setItem('nulife-cart',JSON.stringify(cart)); shell();}
@@ -322,7 +330,8 @@ function authScreen(view,name,secret) {
       return;
     }
     const result=await api(inviting?'/invite':'/login',{...fields,...(inviting?{token:secret}:{})});
-    location.assign('/'+result.role);
+    const returnTo=segments()[1]===result.role&&/^#(orders|order\/[a-f0-9-]{36})$/.test(location.hash)?location.hash:'';
+    location.assign('/'+result.role+returnTo);
   });
 }
 const accountHeading=(title,body)=>'<div class="split">'+heading(title)+btn(L('Sign out','Cerrar sesión'),'secondary small','id="logout"')+'</div>'+body;
@@ -330,10 +339,97 @@ function portalNav(tabs,tab) {
   return '<div class="tabs">'+tabs.map(([id,name])=>pill(name,tab===id,'data-tab="'+id+'"')).join('')+'</div>';
 }
 function setTab(value) {orderPage=0;screenEdit='';activeProduct=null;csvFile='';location.hash=value;}
+function notificationPanel() {
+  return '<section class="panel order-alerts"><div class="split"><div><h3>'+L('Order alerts','Avisos de pedidos')+
+    '</h3><p class="hint" id="pending-orders" aria-live="polite"></p></div><div class="actions" id="alert-buttons"></div></div>'+
+    '<p class="hint" id="alert-help" aria-live="polite"></p></section>';
+}
+async function connectNotifications() {
+  const controls=q('#alert-buttons'), help=q('#alert-help'), pending=q('#pending-orders');
+  const updatePending=count=>{
+    pending.textContent=count===1?L('1 order awaiting confirmation','1 pedido pendiente de confirmación')
+      :L(count+' orders awaiting confirmation',count+' pedidos pendientes de confirmación');
+  };
+  try {
+    const config=await api('/notifications');
+    if(!controls.isConnected) return;
+    updatePending(config.pending);
+    const timer=setInterval(async()=>{
+      if(!controls.isConnected) {clearInterval(timer);return;}
+      if(document.hidden) return;
+      try {updatePending((await api('/notifications')).pending);} catch {}
+    },30000);
+    notificationPoll=timer;
+    if(!config.publicKey) {
+      help.textContent=errorText(new Error('push_unavailable'));
+      return;
+    }
+    if(!('Notification' in window)||!('PushManager' in window)) {
+      help.textContent=L('On iPhone or iPad, add this site to your Home Screen and open it from there to enable alerts. Other devices need a browser that supports push notifications.','En iPhone o iPad, añade este sitio a la pantalla de inicio y ábrelo desde allí para activar los avisos. Otros dispositivos requieren un navegador compatible.');
+      return;
+    }
+    if(Notification.permission==='denied') {
+      help.textContent=L('Allow notifications for this site in your browser settings.','Permite las notificaciones de este sitio en los ajustes del navegador.');
+      return;
+    }
+    const installed=await serviceRegistration;
+    if(!installed) throw new Error('push_unavailable');
+    const registration=await navigator.serviceWorker.ready;
+    if(!controls.isConnected) return;
+    let subscription=await registration.pushManager.getSubscription();
+    let enabled=subscription&&Notification.permission==='granted'&&
+      (await api('/notifications',{action:'check',endpoint:subscription.endpoint})).enabled;
+    function paint() {
+      controls.innerHTML=enabled
+        ?btn(L('Send test alert','Enviar aviso de prueba'),'secondary small','id="alert-test"')+
+          btn(L('Turn off alerts','Desactivar avisos'),'secondary small','id="alert-disable"')
+        :btn(L('Enable order alerts','Activar avisos de pedidos'),'small','id="alert-enable"');
+      help.textContent=enabled?L('Order alerts are on for this device.','Los avisos están activados en este dispositivo.')
+        :L('Receive a device notification when a new order needs your attention.','Recibe una notificación en este dispositivo cuando llegue un pedido.');
+      for(const button of controls.querySelectorAll('button')) button.onclick=async()=>{
+        const buttons=controls.querySelectorAll('button');
+        buttons.forEach(b=>b.disabled=true);
+        try {
+          if(button.id==='alert-enable') {
+            const key=Uint8Array.from(atob(config.publicKey.replaceAll('-','+').replaceAll('_','/')+'='),c=>c.charCodeAt(0));
+            if(!subscription) subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+            const device=subscription.toJSON();
+            await api('/notifications',{action:'enable',endpoint:device.endpoint,keys:device.keys,language:lang});
+            enabled=true;
+            paint();
+          } else if(button.id==='alert-disable') {
+            await api('/notifications',{action:'disable',endpoint:subscription.endpoint});
+            await subscription.unsubscribe().catch(()=>false);
+            subscription=null;
+            enabled=false;
+            paint();
+          } else {
+            await api('/notifications',{action:'test',endpoint:subscription.endpoint});
+            toast(L('Test alert sent to this device.','Aviso de prueba enviado a este dispositivo.'));
+          }
+        } catch(error) {
+          if(error.message==='push_expired') {
+            await subscription?.unsubscribe().catch(()=>false);
+            subscription=null;
+            enabled=false;
+            paint();
+          }
+          help.textContent=Notification.permission==='denied'
+            ?L('Allow notifications for this site in your browser settings.','Permite las notificaciones de este sitio en los ajustes del navegador.')
+            :errorText(error);
+        } finally {buttons.forEach(b=>b.disabled=false);}
+      };
+    }
+    paint();
+  } catch(error) {
+    if(controls.isConnected) help.textContent=errorText(error);
+  }
+}
 function connectPortal() {
   q('#logout').onclick=async()=>{
     try {await api('/logout',{});location.assign('/');} catch(error) {toast(errorText(error));}
   };
+  connectNotifications();
   main.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
 }
 const storeState=s=>s.paused?L('Paused by NuLife','Pausada por NuLife'):s.approved?L('Published','Publicada'):L('Pending NuLife approval','Pendiente de aprobación de NuLife');
@@ -491,7 +587,7 @@ function vendorDashboard(data) {
   const title=accountHeading(L('Vendor dashboard','Panel del comercio'),'<div class="split"><p class="hint">'+E(data.store.name)+'</p>'+storeBadge(data.store)+'</div>');
   const tabs=portalNav([['store',L('Storefront','Tienda')],['catalog',L('Catalog','Catálogo')],['orders',L('Orders','Pedidos')]],tab==='order'?'orders':tab);
   const body=tab==='store'?vendorStore(data.store):tab==='catalog'?vendorCatalog(data.products):tab==='order'?orderDetails(data.order,false):ordersList(data.orders,false);
-  main.innerHTML=page(title,tabs+body,true);
+  main.innerHTML=page(title,notificationPanel()+tabs+body,true);
   connectPortal();vendorConnect(data,tab);connectOrder();
 }
 function inviteBox(result) {
@@ -546,7 +642,7 @@ function adminDashboard(data) {
   const tab=['orders','order','review'].includes(active)?active:'stores';
   const tabs=portalNav([['stores',L('Storefronts','Tiendas')],['orders',L('All orders','Todos los pedidos')]],['orders','order'].includes(tab)?'orders':'stores');
   const body=tab==='review'?adminReview(data.store,data.products):tab==='order'?orderDetails(data.order,true):tab==='orders'?ordersList(data.orders,true):adminStores(data.stores);
-  main.innerHTML=page(accountHeading(L('NuLife administration','Administración de NuLife'),''),tabs+body,true);
+  main.innerHTML=page(accountHeading(L('NuLife administration','Administración de NuLife'),''),notificationPanel()+tabs+body,true);
   connectPortal();connectOrder(true);
   const managedForm=q('#managed-ordering');
   if(managedForm) {
@@ -581,6 +677,7 @@ async function render() {
   const seq=++renderSequence;
   const current=()=>seq===renderSequence;
   clearTimeout(refreshTimer);
+  clearInterval(notificationPoll);
   const [,view,parameter]=segments();
   try {
     if(!view) {const data=await api('/stores');if(current())marketplace(data);}
@@ -637,4 +734,3 @@ shell();
 main.innerHTML='<div class="wrap empty" role="status">'+L('Loading…','Cargando…')+'</div>';
 await api('/me').then(r=>appUser=r.user).catch(()=>{});
 shell();await render();
-if('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(()=>{});

@@ -8,7 +8,7 @@ const flags = Object.fromEntries(process.argv.slice(2).flatMap((value,index,argv
 const port = Number(flags['--port'] || process.env.PORT || 3000);
 const database = process.env.DB_PATH || 'data/app.sqlite';
 if (database !== ':memory:') mkdirSync(dirname(database), { recursive: true });
-const env = { DB: createDatabase(database), LOCAL: '1', PREVIEW: process.env.PREVIEW || '', SECURE_COOKIE: process.env.SECURE_COOKIE || '', FIRST_ADMIN_KEY: process.env.FIRST_ADMIN_KEY || '', FIRST_ADMIN_KEY_EXPIRES: process.env.FIRST_ADMIN_KEY_EXPIRES || '', ASSETS: {
+const env = { PUSH_PUBLIC_KEY:process.env.PUSH_PUBLIC_KEY, PUSH_PRIVATE_KEY:process.env.PUSH_PRIVATE_KEY, PUSH_SUBJECT:process.env.PUSH_SUBJECT, DB: createDatabase(database), LOCAL: '1', PREVIEW: process.env.PREVIEW || '', SECURE_COOKIE: process.env.SECURE_COOKIE || '', FIRST_ADMIN_KEY: process.env.FIRST_ADMIN_KEY || '', FIRST_ADMIN_KEY_EXPIRES: process.env.FIRST_ADMIN_KEY_EXPIRES || '', ASSETS: {
   async fetch(req) {
     const path = new URL(req.url).pathname;
     const file = new URL((path.startsWith('/draft-assets/')?'.':'./public') + path, import.meta.url);

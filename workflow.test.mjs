@@ -149,7 +149,7 @@ test('marketplace and portals enforce the complete ordering workflow',async t=>{
   await guest(statusPath);
 });
 
-test('production hides preview records and supports NuLife-managed and vendor-managed orders',async()=>{
+test('production routes and retries new order alerts for the assigned recipient',async t=>{
   const { createDatabase }=await import('./sqlite.mjs');
   const { default:app, passwordHash, seed }=await import('./worker.mjs');
   const DB=createDatabase(':memory:');
@@ -160,7 +160,49 @@ test('production hides preview records and supports NuLife-managed and vendor-ma
     const path=new URL(request.url).pathname;
     return new Response(await readFile(path==='/index.html'?'public/index.html':'.'+path));
   }};
-  const env={DB,ASSETS,FIRST_ADMIN_KEY:'production-test-key',FIRST_ADMIN_KEY_EXPIRES:String(Date.now()+60000)};
+  const vapid=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']);
+  const env={DB,ASSETS,FIRST_ADMIN_KEY:'production-test-key',FIRST_ADMIN_KEY_EXPIRES:String(Date.now()+60000),
+    PUSH_PUBLIC_KEY:Buffer.from(await crypto.subtle.exportKey('raw',vapid.publicKey)).toString('base64url'),
+    PUSH_PRIVATE_KEY:(await crypto.subtle.exportKey('jwk',vapid.privateKey)).d};
+  const pushes=[];
+  let deferNext=false;
+  t.mock.method(globalThis,'fetch',async (endpoint,options)=>{
+    assert.equal(options.redirect,'error');
+    assert.match(options.headers.authorization,/^vapid t=/);
+    assert.equal(options.headers['content-encoding'],'aes128gcm');
+    assert.equal(options.body.byteLength,4096);
+    pushes.push({endpoint,body:options.body,topic:options.headers.topic});
+    if(deferNext) {
+      deferNext=false;
+      return new Response(null,{status:503,headers:{'Retry-After':'60'}});
+    }
+    return new Response(null,{status:201});
+  });
+  async function device(name) {
+    const keys=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+    const publicKey=Buffer.from(await crypto.subtle.exportKey('raw',keys.publicKey));
+    const auth=crypto.getRandomValues(new Uint8Array(16));
+    return {
+      subscription:{endpoint:'https://fcm.googleapis.com/fcm/send/'+name,
+        keys:{p256dh:publicKey.toString('base64url'),auth:Buffer.from(auth).toString('base64url')}},
+      async read(body) {
+        const salt=body.slice(0,16), server=body.slice(21,86);
+        const encryptionKey=await crypto.subtle.importKey('raw',server,{name:'ECDH',namedCurve:'P-256'},false,[]);
+        const shared=await crypto.subtle.deriveBits({name:'ECDH',public:encryptionKey},keys.privateKey,256);
+        const derive=async (material,salt,info,size)=>{
+          const key=await crypto.subtle.importKey('raw',material,'HKDF',false,['deriveBits']);
+          return crypto.subtle.deriveBits({name:'HKDF',hash:'SHA-256',salt,info},key,size);
+        };
+        const context=Buffer.concat([Buffer.from('WebPush: info\0'),publicKey,server]);
+        const secret=await derive(shared,auth,context,256);
+        const aes=await derive(secret,salt,Buffer.from('Content-Encoding: aes128gcm\0'),128);
+        const iv=await derive(secret,salt,Buffer.from('Content-Encoding: nonce\0'),96);
+        const key=await crypto.subtle.importKey('raw',aes,'AES-GCM',false,['decrypt']);
+        const clear=Buffer.from(await crypto.subtle.decrypt({name:'AES-GCM',iv},key,body.slice(86)));
+        return JSON.parse(clear.subarray(0,clear.indexOf(2)).toString());
+      }
+    };
+  }
   const publicRequest=async(path,body,expected=200,cookie='')=>{
     const response=await app.fetch(new Request('https://market.example'+path,{
       headers:{cookie,'Content-Type':'application/json'},
@@ -183,6 +225,15 @@ test('production hides preview records and supports NuLife-managed and vendor-ma
   await publicRequest('/api/setup',setup);
   await publicRequest('/api/setup',{...setup,email:'second@example.test'},409);
   const adminCookie=getSession(await publicRequest('/api/login',{email:setup.email,password}));
+  const adminDevice=await device('synthetic-admin');
+  const vendorDevice=await device('synthetic-vendor');
+  const alerts='/api/notifications';
+  await publicRequest(alerts,undefined,401);
+  await admin(alerts,{action:'enable',endpoint:'https://example.test/not-a-provider',keys:adminDevice.subscription.keys},400);
+  await admin(alerts,{action:'enable',...adminDevice.subscription,language:'es'});
+  await admin(alerts,{action:'test',endpoint:adminDevice.subscription.endpoint});
+  assert.equal((await adminDevice.read(pushes.shift().body)).url,'/admin#orders');
+  await admin(alerts,{action:'test',endpoint:adminDevice.subscription.endpoint},409);
   const {stores}=await (await admin('/api/admin/stores')).json();
   assert.deepEqual(stores.map(s=>s.slug),['ilia','luiyi-organic-farm']);
   await publicRequest('/api/store/north-coast-garden',undefined,404);
@@ -206,7 +257,24 @@ test('production hides preview records and supports NuLife-managed and vendor-ma
   assert.equal(managedStore.nulife_managed,1);
   assert.equal(managedStore.contact,settings.contact);
   const managed={...order,attempt:crypto.randomUUID()};
+  deferNext=true;
   const placed=await (await publicRequest('/api/order',managed,201)).json();
+  assert.deepEqual(pushes.map(push=>push.endpoint),[adminDevice.subscription.endpoint]);
+  assert.equal((await DB.prepare('SELECT count(*) AS jobs FROM order_alerts').first()).jobs,1);
+  await DB.prepare('UPDATE order_alerts SET next_at=?').bind(Date.now()-1).run();
+  const {pending,publicKey}=await (await admin(alerts)).json();
+  assert.equal(pending,1);
+  assert.equal(publicKey,env.PUSH_PUBLIC_KEY);
+  assert.equal(pushes.length,2);
+  assert.equal(pushes[0].topic,pushes[1].topic);
+  const news=await adminDevice.read(pushes[1].body);
+  assert.equal(news.title,'Nuevo pedido en NuLife');
+  assert.match(news.url,/^\/admin#order\/[\w-]+$/);
+  assert.doesNotMatch(JSON.stringify(news),/Test Guest|555 0101/);
+  assert.equal((await DB.prepare('SELECT count(*) AS jobs FROM order_alerts').first()).jobs,0);
+  await publicRequest('/api/order',managed);
+  assert.equal(pushes.length,2);
+  pushes.length=0;
   const statusPath='/api/status/'+placed.token;
   const guestOrder=async()=> (await (await publicRequest(statusPath)).json()).order;
   const {order:received}=await (await publicRequest(statusPath)).json();
@@ -226,6 +294,12 @@ test('production hides preview records and supports NuLife-managed and vendor-ma
   await admin('/api/admin/store/ordering',settings);
   const {token}=await (await admin('/api/admin/invite',{id:listing.store.id})).json();
   const vendorCookie=getSession(await publicRequest('/api/invite',{token,email:'vendor@example.test',password}));
+  await publicRequest(alerts,{action:'enable',...vendorDevice.subscription,language:'en'},200,vendorCookie);
+  const checkOther=await (await publicRequest(alerts,{action:'check',endpoint:adminDevice.subscription.endpoint},200,vendorCookie)).json();
+  assert.equal(checkOther.enabled,false);
+  await publicRequest(alerts,{action:'disable',endpoint:adminDevice.subscription.endpoint},200,vendorCookie);
+  assert.equal((await (await admin(alerts,{action:'check',endpoint:adminDevice.subscription.endpoint})).json()).enabled,true);
+
   const updateStore={name:listing.store.name,contact:'+1 809 555 0103',areas:'Cabarete',hours:'09:00–18:00',fee:100};
   await publicRequest('/api/vendor/store',updateStore,200,vendorCookie);
   assert.equal((await catalog()).store.fee,0);
@@ -239,6 +313,13 @@ test('production hides preview records and supports NuLife-managed and vendor-ma
   assert.equal(vendorStore.contact,updateStore.contact);
   const vendorPlaced=await (await publicRequest('/api/order',{...order,fee:vendorStore.fee},201)).json();
   const {order:vendorOrder}=await (await publicRequest('/api/status/'+vendorPlaced.token)).json();
+  assert.deepEqual(pushes.map(push=>push.endpoint),[vendorDevice.subscription.endpoint]);
+  assert.equal((await vendorDevice.read(pushes[0].body)).url,'/vendor#order/'+vendorOrder.id);
+  assert.equal((await (await publicRequest(alerts,undefined,200,vendorCookie)).json()).pending,1);
+  await publicRequest(alerts,{action:'disable',endpoint:vendorDevice.subscription.endpoint},200,vendorCookie);
+  const checkDisabled=await (await publicRequest(alerts,{action:'check',endpoint:vendorDevice.subscription.endpoint},200,vendorCookie)).json();
+  assert.equal(checkDisabled.enabled,false);
+
   assert.equal(vendorOrder.nulife_managed,0);
   await admin('/api/admin/order?id='+vendorOrder.id,{status:'confirmed'},403);
   await publicRequest('/api/vendor/order/'+vendorOrder.id,{status:'confirmed'},200,vendorCookie);

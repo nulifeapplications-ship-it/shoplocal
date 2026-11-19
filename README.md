@@ -4,9 +4,10 @@ A bilingual ordering web app for vacation guests in Sosúa and Cabarete. Mobile 
 
 ## Run locally
 
-Install Node.js 24 or newer. Run these commands from the project directory. The app uses SQLite and has no npm dependencies.
+Install Node.js 24 or newer. Run these commands from the project directory. The local app uses SQLite. Install the Node dependencies before running it.
 
 ```bash
+npm ci
 npm test
 read -rs NULIFE_ADMIN_PASSWORD
 printf '%s\n' "$NULIFE_ADMIN_PASSWORD" | PREVIEW=1 ADMIN_EMAIL=admin@example.test npm run admin
@@ -30,6 +31,14 @@ Open **Storefronts**, choose **Review**, and enable **NuLife-managed ordering**.
 Open **All orders** to confirm or decline new NuLife-managed orders, enter final weights for products sold by the pound, and update delivery status. The order's private status page shows the NuLife WhatsApp number for payment coordination.
 
 When the vendor can take over, turn off the setting. NuLife can finish orders already assigned to it. New orders go to the vendor once they have an active account and delivery settings.
+
+## Order alerts
+
+In the admin or vendor dashboard, choose **Enable order alerts** and allow notifications for the site. Use **Send test alert** to verify delivery to that device. On iPhone or iPad, add the marketplace to the Home Screen and open it there before enabling alerts.
+
+Vendor-managed orders alert the vendor's enabled devices. NuLife-managed orders alert the enabled devices on NuLife administrator accounts. The dashboard also shows the number of orders awaiting confirmation for that account.
+
+On a new deployment, configure a stable P-256 VAPID key pair using `PUSH_PUBLIC_KEY` and `PUSH_PRIVATE_KEY` as runtime values. The public key is the base64url-encoded uncompressed EC point. The private key is the base64url JWK `d` value and belongs in a hosting secret. Set `PUSH_SUBJECT` to the public HTTPS site origin or a monitored mailto address. Existing browser subscriptions are tied to the public key.
 
 ## Source catalogs
 
