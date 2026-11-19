@@ -148,3 +148,57 @@ test('marketplace and portals enforce the complete ordering workflow',async t=>{
   await guest(store.logo,undefined,404);
   await guest(statusPath);
 });
+
+test('production hides preview records and accepts orders only from ready vendors',async()=>{
+  const { createDatabase }=await import('./sqlite.mjs');
+  const { default:app, passwordHash, seed }=await import('./worker.mjs');
+  const DB=createDatabase(':memory:');
+  await seed(DB,true);
+  await DB.prepare("INSERT INTO users (id,email,password,role,demo) VALUES (?,?,?,'admin',1)")
+    .bind('demo-admin','admin@nulife-preview.test',await passwordHash(password)).run();
+  const ASSETS={async fetch(request) {
+    const path=new URL(request.url).pathname;
+    return new Response(await readFile(path==='/index.html'?'public/index.html':'.'+path));
+  }};
+  const env={DB,ASSETS,FIRST_ADMIN_KEY:'production-test-key',FIRST_ADMIN_KEY_EXPIRES:String(Date.now()+60000)};
+  const publicRequest=async(path,body,expected=200,cookie='')=>{
+    const response=await app.fetch(new Request('https://market.example'+path,{
+      headers:{cookie,'Content-Type':'application/json'},
+      method:body===undefined?'GET':'POST',
+      body:body===undefined?undefined:JSON.stringify(body)
+    }),env);
+    assert.equal(response.status,expected,path+': '+(response.ok?'':await response.clone().text()));
+    return response;
+  };
+  const admin=(path,body,expected=200)=>publicRequest(path,body,expected,adminCookie);
+  const getSession=res=>res.headers.get('set-cookie').split(';')[0];
+  await publicRequest('/setup');
+  await publicRequest('/api/login',{email:'admin@nulife-preview.test',password},401);
+  const setup={email:'owner@example.test',key:env.FIRST_ADMIN_KEY,password};
+  await publicRequest('/api/setup',{...setup,key:'incorrect'},404);
+  const expiry=env.FIRST_ADMIN_KEY_EXPIRES;
+  env.FIRST_ADMIN_KEY_EXPIRES='1';
+  await publicRequest('/api/setup',setup,404);
+  env.FIRST_ADMIN_KEY_EXPIRES=expiry;
+  await publicRequest('/api/setup',setup);
+  await publicRequest('/api/setup',{...setup,email:'second@example.test'},409);
+  const adminCookie=getSession(await publicRequest('/api/login',{email:setup.email,password}));
+  const {stores}=await (await admin('/api/admin/stores')).json();
+  assert.deepEqual(stores.map(s=>s.slug),['ilia','luiyi-organic-farm']);
+  await publicRequest('/api/store/north-coast-garden',undefined,404);
+  await admin('/api/admin/moderate',{id:'draft-luiyi',action:'approve'});
+  const catalog=async()=> (await (await publicRequest('/api/store/luiyi-organic-farm')).json());
+  const listing=await catalog();
+  assert.equal(listing.store.orderable,0);
+  const product=listing.products[0];
+  const order={store:listing.store.id,attempt:crypto.randomUUID(),guest:'Test Guest',phone:'+1 809 555 0101',
+    property:'Test Property',room:'1',date:new Date(Date.now()+86400000*3).toISOString().slice(0,10),time:'14:00',fee:0,
+    items:[{id:product.id,cents:product.cents,unit:product.unit,quantity:1}]};
+  await publicRequest('/api/order',order,409);
+  const {token}=await (await admin('/api/admin/invite',{id:listing.store.id})).json();
+  const vendorCookie=getSession(await publicRequest('/api/invite',{token,email:'vendor@example.test',password}));
+  assert.equal((await catalog()).store.orderable,0);
+  await publicRequest('/api/vendor/store',{name:listing.store.name,contact:'+1 809 555 0101',areas:'Sosúa',hours:'08:00–14:00',fee:0},200,vendorCookie);
+  assert.equal((await catalog()).store.orderable,1);
+  await publicRequest('/api/order',order,201);
+});

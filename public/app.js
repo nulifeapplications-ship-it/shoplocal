@@ -68,6 +68,9 @@ function errorText(error) {
     image:L('Choose a supported image your phone can open.','Elige una imagen compatible que tu teléfono pueda abrir.'),
     too_large:L('The file is too large.','El archivo es demasiado grande.'),
     checkout_fields:L('Check your name, WhatsApp number, property and unit.','Revisa tu nombre, número de WhatsApp, propiedad y unidad.'),
+    ordering_closed:L('This vendor is still setting up online ordering.','Este comercio aún está configurando los pedidos en línea.'),
+    setup_link:L('This administrator setup link is invalid or expired.','Este enlace de configuración para administración no es válido o ha vencido.'),
+    setup_done:L('An administrator account is already set up. Sign in with that account.','Ya existe una cuenta de administración. Inicia sesión con esa cuenta.'),
     unavailable:L('A store or product is no longer available. Refresh the cart.','Una tienda o un producto ya no está disponible. Actualiza el carrito.'),
     price_changed:L('A price changed. Refresh and review the cart before ordering.','Cambió un precio. Actualiza y revisa el carrito antes de hacer el pedido.'),
     quantity:L('Choose a valid quantity. You can enter up to three decimal places for pounds.','Elige una cantidad válida. Puedes ingresar hasta tres decimales para libras.'),
@@ -162,7 +165,7 @@ function marketplace({stores}) {
     const list=stores.filter(s=>(filter==='all'||s.category===filter)&&[s.name,human(s.description),s.areas,category(s.category)].join(' ').toLowerCase().includes(query.toLowerCase().trim()));
     q('#stores').innerHTML=list.length?'<div class="grid">'+list.map(s=>'<article class="card">'+image(s.logo,'cover '+(s.demo?'':'logo-cover'))+
       '<div class="card-body"><div class="badge-line">'+(s.category?'<span class="category">'+E(category(s.category))+'</span>':'')+
-      (s.demo?' <span class="category preview-label">'+L('Sample vendor','Tienda de ejemplo')+'</span>':'')+'</div>'+
+      (s.demo?' <span class="category preview-label">'+L('Sample vendor','Tienda de ejemplo')+'</span>':s.orderable?'':' <span class="category preview-label">'+L('Catalog only','Solo catálogo')+'</span>')+'</div>'+
       '<h3><a href="/store/'+E(s.slug)+'">'+E(s.name)+'</a></h3>'+(s.description?'<p class="hint">'+E(human(s.description))+'</p>':'')+
       '<div class="card-meta">'+(s.areas?'<span>'+icon('pin')+' '+E(s.areas)+'</span>':'')+'<span>'+icon('truck')+' '+E(deliveryFee(s.fee))+'</span></div>'+
       '<a class="button secondary" href="/store/'+E(s.slug)+'">'+L('Visit store','Ver tienda')+'</a></div></article>').join('')+'</div>':
@@ -187,8 +190,8 @@ function storefront({store:s,products}) {
   main.innerHTML=page(back('/',L('Marketplace','Mercado'))+
     '<div class="store-hero">'+(s.logo?image(s.logo,'store-logo',s.name):'')+'<div>'+(s.category?'<span class="location">'+E(category(s.category))+'</span>':'')+
     heading(E(s.name))+(s.description?'<p>'+E(human(s.description))+'</p>':'')+'</div>'+btn(icon('share')+' '+L('Copy store link','Copiar enlace de tienda'),'secondary','data-copy="'+E(link)+'"')+'</div>',
-    (s.demo?sampleBanner():'')+panel(L('Delivery details','Detalles de entrega'),'<dl class="info-grid">'+info.filter(x=>x[1]).map(([label,value])=>'<div><dt>'+label+'</dt><dd>'+E(value)+'</dd></div>').join('')+'</dl>')+
-    '<section class="products"><h2 class="section-title">'+L('Shop the catalog','Compra en el catálogo')+'</h2><div class="grid products">'+products.map(product=>productCard(product)).join('')+
+    (s.demo?sampleBanner():'')+(s.orderable?'':'<p class="banner sample-notice">'+E(errorText(new Error('ordering_closed')))+'</p>')+panel(L('Delivery details','Detalles de entrega'),'<dl class="info-grid">'+info.filter(x=>x[1]).map(([label,value])=>'<div><dt>'+label+'</dt><dd>'+E(value)+'</dd></div>').join('')+'</dl>')+
+    '<section class="products"><h2 class="section-title">'+L('Shop the catalog','Compra en el catálogo')+'</h2><div class="grid products">'+products.map(product=>productCard(product,s.orderable)).join('')+
     '</div>'+(!products.length?'<p class="empty">'+L('This store has no products available yet.','Esta tienda aún no tiene productos disponibles.')+'</p>':'')+'</section>',true);
   main.querySelectorAll('.product-order').forEach(form=>submit(form,data=>{
     const product=products.find(row=>row.id===form.dataset.id);
@@ -207,16 +210,16 @@ function storefront({store:s,products}) {
       if(cart.items.length>=16) throw new Error('cart');
       cart.items.push({...product,quantity});
     }
-    Object.assign(cart,{store:s.id,slug:s.slug,name:s.name,fee:s.fee,demo:s.demo,attempt:crypto.randomUUID()});
+    Object.assign(cart,{store:s.id,slug:s.slug,name:s.name,fee:s.fee,demo:s.demo,orderable:Boolean(s.orderable),attempt:crypto.randomUUID()});
     persistCart();toast(L('Added to cart','Agregado al carrito'));
   }));
 }
-function productCard(p) {
+function productCard(p,orderable) {
   return '<article class="card product-card">'+(p.photo?image(p.photo,'cover'): '')+'<div class="card-body">'+
     (p.category?'<span class="category">'+E(category(p.category))+'</span>':'')+'<h3>'+E(human(p.name))+'</h3>'+
     (p.description?'<p class="hint">'+E(human(p.description))+'</p>':'')+'<p class="price">'+money(p.cents)+' / '+E(unitName(p))+'</p>'+
     (p.unit==='lb'?'<p class="hint">'+L('Total based on final weight','Total según el peso final')+'</p>':'')+
-    (p.soldout?'<span class="status stopped">'+L('Sold out','Agotado')+'</span>':
+    (p.soldout?'<span class="status stopped">'+L('Sold out','Agotado')+'</span>':!orderable?'':
       '<form class="product-order" data-id="'+E(p.id)+'"><label>'+L('Qty.','Cant.')+'<input name="quantity" type="number" inputmode="decimal" required min="'+(p.unit==='lb'?'0.001':'1')+'" max="1000" step="'+(p.unit==='lb'?'0.001':'1')+'" value="1"></label>'+
       btn(icon('cart')+' '+L('Add to cart','Agregar'))+'</form>')+'</div></article>';
 }
@@ -234,10 +237,11 @@ function cartScreen() {
     return;
   }
   const {items,fee}=cart;
+  const canOrder=cart.orderable!==false;
   const total=items.reduce((sum,p)=>sum+Math.round(p.quantity*p.cents),fee||0);
   const list='<div class="rows">'+items.map(p=>'<div class="row"><div><strong>'+E(human(p.name))+'</strong><p class="hint">'+E(p.quantity)+' '+E(unitName(p))+' × '+money(p.cents)+'</p></div>'+
     btn(L('Remove','Quitar'),'secondary small','type="button" data-remove="'+E(p.id)+'"')+'</div>').join('')+'</div>';
-  const form='<form id="checkout" class="form">'+errorBox+'<div class="form-grid">'+
+  const form=canOrder?'<form id="checkout" class="form">'+errorBox+'<div class="form-grid">'+
     input('guest',L('Full name','Nombre completo'),'','required autocomplete="name" maxlength="140"')+
     input('phone',L('WhatsApp number','Número de WhatsApp'),'','required type="tel" autocomplete="tel" placeholder="+1 809 555 0100"')+
     input('property',L('Property','Propiedad'),'','required maxlength="140"')+
@@ -247,7 +251,7 @@ function cartScreen() {
     area('notes',L('Notes (optional)','Notas (opcional)'))+'</div>'+
     '<p class="hint">'+L('You will arrange payment directly with the vendor.','Coordinarás el pago directamente con el comercio.')+'</p>'+
     (fee===null?'<p class="hint">'+L('Confirm any delivery fee with the vendor.','Confirma la tarifa de entrega con el comercio.')+'</p>':'')+
-    btn(L('Place order','Hacer pedido'))+'</form>';
+    btn(L('Place order','Hacer pedido'))+'</form>':'<p class="banner">'+E(errorText(new Error('ordering_closed')))+'</p>';
   main.innerHTML=page(back('/store/'+cart.slug,L('Continue shopping','Seguir comprando'))+title,(cart.demo?sampleBanner():'')+
     '<div class="checkout"><div class="checkout-items stack">'+panel(E(cart.name),list+btn(L('Refresh cart','Actualizar carrito'),'secondary small','id="refresh-cart" type="button"')+
     costs(items,fee,items.some(p=>p.unit==='lb')||fee===null,total))+'</div><div class="checkout-form">'+panel(L('Delivery information','Datos de entrega'),form)+'</div></div>',true);
@@ -262,9 +266,10 @@ function cartScreen() {
         const latest=products.find(p=>p.id===item.id&&!p.soldout&&validQuantity(item.quantity,p.unit));
         return latest?[{...latest,quantity:item.quantity}]:[];
       });
-      cart.fee=store.fee;cart.attempt=crypto.randomUUID();persistCart();cartScreen();toast(L('Cart updated','Carrito actualizado'));
+      cart.fee=store.fee;cart.orderable=Boolean(store.orderable);cart.attempt=crypto.randomUUID();persistCart();cartScreen();toast(L('Cart updated','Carrito actualizado'));
     } catch(e) {toast(errorText(e));}
   };
+  if(!canOrder) return;
   submit(q('#checkout'),async data=>{
     if(!cart.attempt) {cart.attempt=crypto.randomUUID();persistCart();}
     const result=await api('/order',{...Object.fromEntries(data),store:cart.store,fee:cart.fee,attempt:cart.attempt,
@@ -293,17 +298,24 @@ function statusScreen({order:o}) {
   q('#refresh-order').onclick=()=>render();
 }
 function authScreen(view,name,secret) {
-  const inviting=view==='invite';
-  const title=inviting?L('Set up your vendor account','Crea tu cuenta de comercio'):L('Vendor and admin sign-in','Acceso para comercios y administración');
+  const inviting=view==='invite', setup=view==='setup';
+  const creating=inviting||setup;
+  const title=setup?L('Set up NuLife administration','Configura la administración de NuLife'):inviting?L('Set up your vendor account','Crea tu cuenta de comercio'):L('Vendor and admin sign-in','Acceso para comercios y administración');
   const body='<form class="form" id="auth">'+errorBox+
     (inviting?'<p>'+L('Your invitation is for','Tu invitación es para')+' <strong>'+E(name)+'</strong>.</p>':'')+
     input('email',L('Email','Correo electrónico'),'','type="email" required autocomplete="username"')+
-    input('password',L('Password','Contraseña'),'','type="password" required maxlength="128" '+(inviting?'minlength="12" autocomplete="new-password"':'autocomplete="current-password"'))+
-    (inviting?'<p class="hint">'+L('Use at least 12 characters. Sign in with this account on future visits.','Usa al menos 12 caracteres. Usa esta cuenta la próxima vez que ingreses.')+'</p>':'')+
-    btn(inviting?L('Accept invitation','Aceptar invitación'):L('Sign in','Iniciar sesión'))+'</form>';
+    input('password',L('Password','Contraseña'),'','type="password" required maxlength="128" '+(creating?'minlength="12" autocomplete="new-password"':'autocomplete="current-password"'))+
+    (creating?'<p class="hint">'+L('Use at least 12 characters. Sign in with this account on future visits.','Usa al menos 12 caracteres. Usa esta cuenta la próxima vez que ingreses.')+'</p>':'')+
+    btn(setup?L('Create administrator account','Crear cuenta de administración'):inviting?L('Accept invitation','Aceptar invitación'):L('Sign in','Iniciar sesión'))+'</form>';
   main.innerHTML=page(back('/',L('Marketplace','Mercado'))+heading(title),panel('',body));
   submit(q('#auth'),async data=>{
-    const result=await api(inviting?'/invite':'/login',{...Object.fromEntries(data),...(inviting?{token:secret}:{})});
+    const fields=Object.fromEntries(data);
+    if(setup) {
+      await api('/setup',{...fields,key:secret});
+      location.replace('/login');
+      return;
+    }
+    const result=await api(inviting?'/invite':'/login',{...fields,...(inviting?{token:secret}:{})});
     location.assign('/'+result.role);
   });
 }
@@ -540,7 +552,21 @@ async function render() {
   try {
     if(!view) {const data=await api('/stores');if(current())marketplace(data);}
     else if(view==='store') {const data=await api('/store/'+encodeURIComponent(parameter));if(current())storefront(data);}
-    else if(view==='cart') cartScreen();
+    else if(view==='cart') {
+      if(cart.items.length) {
+        const {store}=await api('/store/'+encodeURIComponent(cart.slug)).catch(error=>{
+          if(error.message==='not_found') return {store:null};
+          throw error;
+        });
+        cart.orderable=Boolean(store?.orderable);
+      }
+      if(current())cartScreen();
+    }
+    else if(view==='setup') {
+      const key=location.hash.slice(1);
+      if(!/^[a-f0-9]{64}$/.test(key)) throw new Error('setup_link');
+      authScreen('setup',null,key);
+    }
     else if(view==='order') {
       const data=await api('/status/'+encodeURIComponent(parameter));
       if(current()) {statusScreen(data);refreshTimer=setTimeout(()=>{if(!document.hidden)render();else refreshTimer=setTimeout(render,30000);},30000);}

@@ -18,6 +18,7 @@ const db=createDatabase(path);
 await seed(db,process.env.PREVIEW==='1',{async fetch(request) {
   return new Response(await readFile(new URL('.'+new URL(request.url).pathname,import.meta.url)));
 }});
-const result=await db.prepare("INSERT INTO users (id,email,password,role) VALUES (?,?,?,'admin') ON CONFLICT(email) DO UPDATE SET password=excluded.password WHERE users.role='admin'").bind(crypto.randomUUID(),address,await passwordHash(password)).run();
+const demo=Number(process.env.PREVIEW==='1'&&address.endsWith('@nulife-preview.test'));
+const result=await db.prepare("INSERT INTO users (id,email,password,role,demo) VALUES (?,?,?,'admin',?) ON CONFLICT(email) DO UPDATE SET password=excluded.password,demo=excluded.demo WHERE users.role='admin'").bind(crypto.randomUUID(),address,await passwordHash(password),demo).run();
 if(result.meta.changes!==1) throw new Error('Email is already used by a vendor.');
 console.log('Administrator ready: '+address);

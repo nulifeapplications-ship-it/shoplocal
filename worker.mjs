@@ -76,9 +76,9 @@ async function session(db,user,env,request) {
   return json({role:user.role,store:user.store},200,{'Set-Cookie':cookie(key,max,env)});
 }
 function cookieToken(req) {return (req.headers.get('cookie')||'').match(/(?:^|;\s*)nulife_session=([a-f0-9]{64})(?:;|$)/)?.[1];}
-async function actor(req,db) {
+async function actor(req,db,preview) {
   const key=cookieToken(req);
-  return key ? one(db,'SELECT users.id, email, role, store FROM users JOIN sessions ON users.id=sessions.user_id WHERE token=? AND expires>?',await digest(key),Date.now()) : null;
+  return key ? one(db,'SELECT users.id, email, role, store FROM users JOIN sessions ON users.id=sessions.user_id WHERE token=? AND expires>? AND (users.demo=0 OR ?=1)',await digest(key),Date.now(),Number(preview)) : null;
 }
 function role(user,permission) {
   if(!user) fail('sign_in',401);
@@ -181,6 +181,8 @@ function parseCSV(value) {
   });
 }
 const publicStoreColumns='id,slug,name,description,category,contact,areas,hours,fee,instructions,logo,demo';
+const liveCheckout=`stores.demo=0 AND stores.contact<>'' AND stores.areas<>'' AND stores.hours<>'' AND stores.fee IS NOT NULL
+  AND EXISTS(SELECT 1 FROM users WHERE users.store=stores.id AND users.role='vendor' AND users.demo=0)`;
 const publicProductColumns='id,name,category,description,cents,unit,pack,photo,soldout';
 const nqty = (q,unit) => {
   const num=Number(q);
@@ -213,28 +215,34 @@ async function api(req,env,path) {
     if((origin&&origin!==url.origin)||req.headers.get('sec-fetch-site')==='cross-site') fail('forbidden',403);
     if(req.headers.get('content-type')?.split(';',1)[0].trim().toLowerCase()!=='application/json') fail('invalid',415);
   }
-  const user=await actor(req,db);
+  const preview=env.PREVIEW==='1';
+  const visible=preview?'1=1':'stores.demo=0';
+  const checkout='stores.approved=1 AND stores.paused=0 AND '+(preview?'1=1':liveCheckout);
+  const user=await actor(req,db,preview);
   const p=async()=>payload(req);
   const params=url.searchParams;
 
-  if(method==='GET'&&path==='/api/config') return json({preview:env.PREVIEW==='1'});
+  if(method==='GET'&&path==='/api/config') return json({preview});
   if(method==='GET'&&path==='/api/stores') {
-    if(env.PREVIEW==='1' && !await one(db,'SELECT 1 FROM stores WHERE demo=1 LIMIT 1')) await seed(db,true);
-    return json({stores:await all(db,'SELECT '+publicStoreColumns+' FROM stores WHERE approved=1 AND paused=0 ORDER BY demo, name')});
+    if(preview && !await one(db,'SELECT 1 FROM stores WHERE demo=1 LIMIT 1')) await seed(db,true);
+    return json({stores:await all(db,'SELECT '+publicStoreColumns+', ('+checkout+') AS orderable FROM stores WHERE approved=1 AND paused=0 AND '+visible+' ORDER BY demo, name')});
   }
   if(method==='GET'&&path.startsWith('/api/store/')) {
-    const store=await one(db,'SELECT '+publicStoreColumns+' FROM stores WHERE slug=? AND approved=1 AND paused=0',path.split('/').pop());
+    const store=await one(db,'SELECT '+publicStoreColumns+', ('+checkout+') AS orderable FROM stores WHERE slug=? AND approved=1 AND paused=0 AND '+visible,path.split('/').pop());
     if(!store) fail('not_found',404);
     return json({store,products:await all(db,'SELECT '+publicProductColumns+' FROM products WHERE store=? AND hidden=0 AND paused=0 ORDER BY category,name',store.id)});
   }
   if(method==='GET'&&path==='/api/me') return json({user});
   if(method==='POST'&&path==='/api/setup') {
     const v=await p();
-    if(!env.FIRST_ADMIN_KEY || typeof v.key!=='string' || !equal(v.key,env.FIRST_ADMIN_KEY)) fail('not_found',404);
+    if(!env.FIRST_ADMIN_KEY || typeof v.key!=='string' || !equal(v.key,env.FIRST_ADMIN_KEY)
+      || (env.FIRST_ADMIN_KEY_EXPIRES && !(Number(env.FIRST_ADMIN_KEY_EXPIRES)>Date.now()))) fail('setup_link',404);
     const address=email(v.email);
-    required(validEmail(address)&&validPassword(v.password),'credentials');
-    await seed(db,env.PREVIEW==="1",env.ASSETS);
-    const result=await run(db,"INSERT INTO users (id,email,password,role) SELECT ?,?,?,'admin' WHERE NOT EXISTS (SELECT 1 FROM users WHERE role='admin')",id(),address,await passwordHash(v.password));
+    required(validEmail(address)&&validPassword(v.password)&&!address.endsWith('@nulife-preview.test'),'credentials');
+    if(await one(db,"SELECT 1 FROM users WHERE role='admin' AND demo=0")) fail('setup_done',409);
+    if(await one(db,'SELECT 1 FROM users WHERE email=?',address)) fail('email_used',409);
+    await seed(db,preview,env.ASSETS);
+    const result=await run(db,"INSERT OR IGNORE INTO users (id,email,password,role) SELECT ?,?,?,'admin' WHERE NOT EXISTS (SELECT 1 FROM users WHERE role='admin' AND demo=0)",id(),address,await passwordHash(v.password));
     if(result.meta.changes!==1) fail('setup_done',409);
     return json({ok:true});
   }
@@ -247,12 +255,12 @@ async function api(req,env,path) {
       ON CONFLICT(key) DO UPDATE SET count=CASE WHEN expires<=? THEN 1 ELSE count+1 END,
       expires=CASE WHEN expires<=? THEN excluded.expires ELSE expires END RETURNING count`,key,now+900000,now,now)));
     if(results.some((result,i)=>result.results[0].count>(i===0?12:60))) fail('login_limit',429);
-    let account=validEmail(address)?await one(db,'SELECT * FROM users WHERE email=?',address):null;
-    if(!account && env.PREVIEW==='1' && env.PREVIEW_ADMIN_PASSWORD && address===env.PREVIEW_ADMIN_EMAIL
+    let account=validEmail(address)?await one(db,'SELECT * FROM users WHERE email=? AND (demo=0 OR ?=1)',address,Number(preview)):null;
+    if(!account && preview && env.PREVIEW_ADMIN_PASSWORD && address===env.PREVIEW_ADMIN_EMAIL
           && validPassword(v.password) && equal(v.password,env.PREVIEW_ADMIN_PASSWORD)) {
       const password=await passwordHash(v.password);
       await seed(db,true,env.ASSETS);
-      await run(db,"INSERT OR IGNORE INTO users (id,email,password,role) SELECT ?,?,?,'admin' WHERE NOT EXISTS (SELECT 1 FROM users WHERE role='admin')",id(),address,password);
+      await run(db,"INSERT OR IGNORE INTO users (id,email,password,role,demo) SELECT ?,?,?,'admin',1 WHERE NOT EXISTS (SELECT 1 FROM users WHERE role='admin')",id(),address,password);
       account=await one(db,"SELECT * FROM users WHERE email=? AND role='admin'",address);
     }
     const [salt,hash]=(account?.password||'0:0').split(':');
@@ -270,18 +278,18 @@ async function api(req,env,path) {
     const v=method==='POST'?await p():{token:params.get('token')};
     if(!/^[a-f0-9]{64}$/.test(v.token||'')) fail('invite_invalid',404);
     const hash=await digest(v.token);
-    const invite=await one(db,'SELECT invites.*,stores.name FROM invites JOIN stores ON stores.id=invites.store WHERE token=? AND expires>? AND claim IS NULL',hash,Date.now());
+    const invite=await one(db,'SELECT invites.*,stores.name FROM invites JOIN stores ON stores.id=invites.store WHERE token=? AND expires>? AND claim IS NULL AND '+visible,hash,Date.now());
     if(!invite) fail('invite_invalid',404);
     if(method==='GET') return json({name:invite.name});
     const address=email(v.email);
-    required(validEmail(address)&&validPassword(v.password),'credentials');
+    required(validEmail(address)&&validPassword(v.password)&&(preview||!address.endsWith('@nulife-preview.test')),'credentials');
     const account={id:id(),store:invite.store,role:'vendor'};
     const password=await passwordHash(v.password);
     let result;
     try {
       result=await db.batch([
         sql(db,"UPDATE invites SET claim=? WHERE token=? AND claim IS NULL AND expires>? AND NOT EXISTS(SELECT 1 FROM users WHERE store=?)",account.id,hash,Date.now(),account.store),
-        sql(db,"INSERT INTO users SELECT ?,?,?,'vendor',store FROM invites WHERE token=? AND claim=?",account.id,address,password,hash,account.id)
+        sql(db,"INSERT INTO users (id,email,password,role,store,demo) SELECT ?,?,?,'vendor',store,? FROM invites WHERE token=? AND claim=?",account.id,address,password,Number(address.endsWith('@nulife-preview.test')),hash,account.id)
       ]);
     } catch(error) {
       if(String(error).includes('UNIQUE')) fail('email_used',409);
@@ -294,7 +302,7 @@ async function api(req,env,path) {
   if(method==='GET'&&path.startsWith('/api/status/')) {
     const t=path.split('/').pop();
     if(!/^[a-f0-9]{64}$/.test(t)) fail('not_found',404);
-    const row=await one(db,joinedOrder+' WHERE orders.token=?',await digest(t));
+    const row=await one(db,joinedOrder+' WHERE orders.token=? AND '+visible,await digest(t));
     if(!row) fail('not_found',404);
     return json({order:orderData(row,true)});
   }
@@ -303,9 +311,9 @@ async function api(req,env,path) {
     const attempt=limit(v.attempt,90);
     required(/^[a-f0-9-]{36}$/.test(attempt),'invalid');
     const attemptHash=await digest(attempt);
-    const old=await one(db,'SELECT number FROM orders WHERE attempt=?',attemptHash);
+    const old=await one(db,'SELECT orders.number FROM orders JOIN stores ON stores.id=orders.store WHERE orders.attempt=? AND '+visible,attemptHash);
     if(old) return json({number:old.number,token:await digest('order:'+attempt),repeated:true});
-    const store=await one(db,'SELECT id,fee FROM stores WHERE id=? AND approved=1 AND paused=0',limit(v.store,80));
+    const store=await one(db,'SELECT id,fee FROM stores WHERE id=? AND '+checkout,limit(v.store,80));
     if(!store) fail('unavailable',409);
     const guest=limit(v.guest,140), phone=limit(v.phone,40), property=limit(v.property,140), room=limit(v.room,80);
     const date=limit(v.date,10), time=limit(v.time,5), notes=limit(v.notes,1200);
@@ -331,12 +339,12 @@ async function api(req,env,path) {
     const conditions=items.map(()=>"(id=? AND cents=? AND unit=? AND name=? AND pack=?)").join(' OR ');
     const result=await run(db,`INSERT OR IGNORE INTO orders (id,number,token,store,guest,phone,property,room,delivery_date,delivery_time,notes,fee,items,created,updated,attempt)
       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-      WHERE EXISTS (SELECT 1 FROM stores WHERE id=? AND approved=1 AND paused=0 AND fee IS ?)
+      WHERE EXISTS (SELECT 1 FROM stores WHERE id=? AND fee IS ? AND ${checkout})
       AND (SELECT count(*) FROM products WHERE store=? AND hidden=0 AND paused=0 AND soldout=0 AND (${conditions}))=?`,
       id(),number,await digest(privateLink),store.id,guest,phone,property,room,date,time,notes,store.fee,JSON.stringify(items),now,now,attemptHash,
       store.id,store.fee,store.id,...items.flatMap(x=>[x.id,x.cents,x.unit,x.name,x.pack]),items.length);
     if(result.meta.changes!==1) {
-      const existing=await one(db,'SELECT number FROM orders WHERE attempt=?',attemptHash);
+      const existing=await one(db,'SELECT orders.number FROM orders JOIN stores ON stores.id=orders.store WHERE orders.attempt=? AND '+visible,attemptHash);
       if(existing) return json({number:existing.number,token:privateLink,repeated:true});
       fail('unavailable',409);
     }
@@ -345,7 +353,7 @@ async function api(req,env,path) {
 
   if(path.startsWith('/api/vendor/')) {
     role(user,'vendor');
-    const store=await one(db,'SELECT * FROM stores WHERE id=?',user.store);
+    const store=await one(db,'SELECT *, ('+checkout+') AS orderable FROM stores WHERE id=? AND '+visible,user.store);
     if(!store) fail('not_found',404);
     if(method==='GET'&&path==='/api/vendor/store') return json({store,products:await all(db,'SELECT * FROM products WHERE store=? ORDER BY name',store.id)});
     if(method==='POST'&&path==='/api/vendor/store') {
@@ -423,25 +431,25 @@ async function api(req,env,path) {
   if(path.startsWith('/api/admin/')) {
     role(user,'admin');
     if(method==='GET'&&path==='/api/admin/stores') {
-      return json({stores:await all(db,'SELECT stores.*, EXISTS(SELECT 1 FROM users WHERE users.store=stores.id) AS account FROM stores ORDER BY demo, approved, name')});
+      return json({stores:await all(db,'SELECT stores.*, EXISTS(SELECT 1 FROM users WHERE users.store=stores.id) AS account, ('+checkout+') AS orderable FROM stores WHERE '+visible+' ORDER BY demo, approved, name')});
     }
     if(method==='GET'&&path==='/api/admin/store') {
-      const store=await one(db,'SELECT * FROM stores WHERE id=?',params.get('id'));
+      const store=await one(db,'SELECT *, ('+checkout+') AS orderable FROM stores WHERE id=? AND '+visible,params.get('id'));
       if(!store) fail('not_found',404);
       return json({store,products:await all(db,'SELECT * FROM products WHERE store=? ORDER BY name',store.id)});
     }
     if(method==='GET'&&path==='/api/admin/orders') {
       const page=Math.max(0,Math.min(100000,Number(params.get('page'))||0));
-      return json({orders:(await all(db,joinedOrder+' ORDER BY orders.created DESC LIMIT 51 OFFSET ?',Math.floor(page)*50)).map(row=>orderData(row))});
+      return json({orders:(await all(db,joinedOrder+' WHERE '+visible+' ORDER BY orders.created DESC LIMIT 51 OFFSET ?',Math.floor(page)*50)).map(row=>orderData(row))});
     }
     if(method==='GET'&&path==='/api/admin/order') {
-      const row=await one(db,joinedOrder+' WHERE orders.id=?',params.get('id'));
+      const row=await one(db,joinedOrder+' WHERE orders.id=? AND '+visible,params.get('id'));
       if(!row) fail('not_found',404);
       return json({order:orderData(row)});
     }
     if(method==='POST'&&path==='/api/admin/invite') {
       const v=await p(), name=limit(v.name,140);
-      let store=v.id?await one(db,'SELECT id FROM stores WHERE id=?',limit(v.id,75)):null;
+      let store=v.id?await one(db,'SELECT id FROM stores WHERE id=? AND '+visible,limit(v.id,75)):null;
       if(v.id&&!store) fail('not_found',404);
       if(!store) {
         required(name,'store_fields');
@@ -460,11 +468,11 @@ async function api(req,env,path) {
       const v=await p(), target=limit(v.id,75);
       let result;
       switch(v.action) {
-        case 'approve': result=await run(db,'UPDATE stores SET approved=1 WHERE id=?',target);break;
+        case 'approve': result=await run(db,'UPDATE stores SET approved=1 WHERE id=? AND '+visible,target);break;
         case 'pause_store':
-        case 'resume_store': result=await run(db,'UPDATE stores SET paused=? WHERE id=?',Number(v.action==='pause_store'),target);break;
+        case 'resume_store': result=await run(db,'UPDATE stores SET paused=? WHERE id=? AND '+visible,Number(v.action==='pause_store'),target);break;
         case 'pause_product':
-        case 'resume_product': result=await run(db,'UPDATE products SET paused=? WHERE id=?',Number(v.action==='pause_product'),target);break;
+        case 'resume_product': result=await run(db,'UPDATE products SET paused=? WHERE id=? AND EXISTS(SELECT 1 FROM stores WHERE stores.id=products.store AND '+visible+')',Number(v.action==='pause_product'),target);break;
         default: fail('invalid');
       }
       if(result.meta.changes!==1) fail('not_found',404);
@@ -475,8 +483,8 @@ async function api(req,env,path) {
 }
 
 async function serveMedia(request,env,path) {
-  const db=env.DB, user=await actor(request,db), mediaID=path.split('/').pop();
-  const found=await one(db,'SELECT store,mime FROM media WHERE id=?',mediaID);
+  const db=env.DB, preview=env.PREVIEW==='1', user=await actor(request,db,preview), mediaID=path.split('/').pop();
+  const found=await one(db,'SELECT media.store,media.mime FROM media JOIN stores ON stores.id=media.store WHERE media.id=? AND (stores.demo=0 OR ?=1)',mediaID,Number(preview));
   if(!found) fail('not_found',404);
   if(user?.role!=='admin' && user?.store!==found.store) {
     const visible=await one(db,`SELECT 1 FROM stores WHERE id=? AND approved=1 AND paused=0 AND
@@ -493,7 +501,7 @@ export default {
       if(path.startsWith('/api/')) return await api(request,env,path);
       if(path.startsWith('/media/')) return await serveMedia(request,env,path);
       if(path.startsWith('/draft-assets/')) fail('not_found',404);
-      const entry=path==='/'||/^\/(store|invite|order)\/[^/]+\/?$/.test(path)||['/cart','/login','/vendor','/admin'].includes(path);
+      const entry=path==='/'||/^\/(store|invite|order)\/[^/]+\/?$/.test(path)||['/cart','/login','/setup','/vendor','/admin'].includes(path);
       const target=entry?'/index.html':path;
       const response=await env.ASSETS.fetch(new Request(new URL(target,url)));
       const safe=new Headers(response.headers);

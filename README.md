@@ -27,11 +27,17 @@ Type a password of at least 12 characters after the second line. Open http://loc
 
 The draft stores contain 35 Luiyi Organic Farm listings and 36 Ilia (Daja Land) listings, both with the embedded source logos. The phone numbers and Luiyi product photos associated with named products came from the respective documents. Where the price lists do not specify a sales unit, the draft uses a per-item listing with an empty package-size field. Confirm the quantities, delivery details, and current availability with each vendor before approval. Microgreens are listed as a three-pack at RD$500 and Ilia's cocoa as a fixed ¾-lb package at RD$700. Prices quoted per pound remain estimated until the vendor records the actual weight.
 
-## Hosting for live orders
+## Production launch
 
-Use a clean database with preview mode disabled. Serve the Node app behind HTTPS, set `SECURE_COOKIE=1`, and place `DB_PATH` on a persistent private volume. Back up that database and restrict access to it. The database contains guest names, WhatsApp numbers, property information, private order records, and uploaded images. Test a private status URL on the production domain before sharing it. No payment gateway credentials are required. Guests settle directly with vendors.
+The live marketplace runs on ChatGPT Sites. The Git repository contains the application code and draft catalogs. The hosted D1 database and credentials are managed in Sites. Guest orders and uploaded files stay in D1.
 
-Alternatively, `npm run build` creates a Worker build in `dist/` for Sites or Cloudflare. Bind a dedicated D1 database as `DB` and apply both SQL migrations. Set a random, temporary `FIRST_ADMIN_KEY` as a runtime secret. POST JSON with `key`, `email`, and `password` to `/api/setup` from a trusted client to create the first administrator and seed source drafts, then remove the runtime secret. Keep `PREVIEW`, `PREVIEW_ADMIN_EMAIL`, and `PREVIEW_ADMIN_PASSWORD` unset in production. Configure public access so guests and vendors can open links from WhatsApp. Preview credentials and data are for testing only.
+Approved storefronts can be browsed as soon as they are published. Checkout opens when the vendor accepts their invitation and saves their phone number, delivery areas, hours, and a delivery fee. Enter zero for free delivery. Vendors confirm orders in their dashboard and arrange payment directly with guests.
+
+For another deployment, provision a persistent database and use HTTPS. The Node app uses SQLite, `DB_PATH` on a private persistent volume, and `SECURE_COOKIE=1` behind the HTTPS endpoint. For Sites or Cloudflare Workers, `npm run build` produces the Worker bundle. Bind D1 as `DB` and apply the migrations in order.
+
+For first administrator setup, set a random 32-byte hex `FIRST_ADMIN_KEY` as a runtime secret. Set `FIRST_ADMIN_KEY_EXPIRES` to a future Unix timestamp in milliseconds. Open `/setup#<key>` on the deployed site, choose an admin email and password, and sign in. The link stops creating accounts once the first production administrator exists. Remove the setup secret after use.
+
+Leave `PREVIEW`, `PREVIEW_ADMIN_EMAIL`, and `PREVIEW_ADMIN_PASSWORD` unset for live use. On the original Site, preview accounts, stores, and orders are retained in the database and excluded from production sign-in, storefronts, checkout, and order views. Use a separate database for future testing.
 
 ## Verified
 
