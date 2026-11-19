@@ -149,7 +149,7 @@ test('marketplace and portals enforce the complete ordering workflow',async t=>{
   await guest(statusPath);
 });
 
-test('production hides preview records and accepts orders only from ready vendors',async()=>{
+test('production hides preview records and supports NuLife-managed and vendor-managed orders',async()=>{
   const { createDatabase }=await import('./sqlite.mjs');
   const { default:app, passwordHash, seed }=await import('./worker.mjs');
   const DB=createDatabase(':memory:');
@@ -186,19 +186,67 @@ test('production hides preview records and accepts orders only from ready vendor
   const {stores}=await (await admin('/api/admin/stores')).json();
   assert.deepEqual(stores.map(s=>s.slug),['ilia','luiyi-organic-farm']);
   await publicRequest('/api/store/north-coast-garden',undefined,404);
-  await admin('/api/admin/moderate',{id:'draft-luiyi',action:'approve'});
-  const catalog=async()=> (await (await publicRequest('/api/store/luiyi-organic-farm')).json());
+  await admin('/api/admin/moderate',{id:'draft-ilia',action:'approve'});
+  const catalog=async()=> (await (await publicRequest('/api/store/ilia')).json());
   const listing=await catalog();
   assert.equal(listing.store.orderable,0);
-  const product=listing.products[0];
+  const product=listing.products.find(item=>item.unit==='lb');
   const order={store:listing.store.id,attempt:crypto.randomUUID(),guest:'Test Guest',phone:'+1 809 555 0101',
     property:'Test Property',room:'1',date:new Date(Date.now()+86400000*3).toISOString().slice(0,10),time:'14:00',fee:0,
     items:[{id:product.id,cents:product.cents,unit:product.unit,quantity:1}]};
   await publicRequest('/api/order',order,409);
+
+  const settings={id:listing.store.id,managed:true,contact:'+1 809 555 0102',areas:'Sosúa',hours:'08:00–14:00',fee:0};
+  await publicRequest('/api/admin/store/ordering',settings,401);
+  await admin('/api/admin/store/ordering',{...settings,hours:''},400);
+  assert.equal((await catalog()).store.orderable,0);
+  await admin('/api/admin/store/ordering',settings);
+  const managedStore=(await catalog()).store;
+  assert.equal(managedStore.orderable,1);
+  assert.equal(managedStore.nulife_managed,1);
+  assert.equal(managedStore.contact,settings.contact);
+  const managed={...order,attempt:crypto.randomUUID()};
+  const placed=await (await publicRequest('/api/order',managed,201)).json();
+  const statusPath='/api/status/'+placed.token;
+  const guestOrder=async()=> (await (await publicRequest(statusPath)).json()).order;
+  const {order:received}=await (await publicRequest(statusPath)).json();
+  assert.equal(received.nulife_managed,1);
+  assert.equal(received.contact,settings.contact);
+  assert.equal(received.managed_contact,undefined);
+  const {orders}=await (await admin('/api/admin/orders')).json();
+  const orderID=orders.find(entry=>entry.number===placed.number).id;
+  const adminOrder='/api/admin/order?id='+orderID;
+  await admin(adminOrder,{status:'confirmed'});
+  assert.equal((await guestOrder()).status,'confirmed');
+
+  await admin('/api/admin/store/ordering',{id:settings.id,managed:false});
+  assert.equal((await catalog()).store.orderable,0);
+  assert.equal((await catalog()).store.contact,listing.store.contact);
+  await publicRequest('/api/order',order,409);
+  await admin('/api/admin/store/ordering',settings);
   const {token}=await (await admin('/api/admin/invite',{id:listing.store.id})).json();
   const vendorCookie=getSession(await publicRequest('/api/invite',{token,email:'vendor@example.test',password}));
-  assert.equal((await catalog()).store.orderable,0);
-  await publicRequest('/api/vendor/store',{name:listing.store.name,contact:'+1 809 555 0101',areas:'Sosúa',hours:'08:00–14:00',fee:0},200,vendorCookie);
-  assert.equal((await catalog()).store.orderable,1);
-  await publicRequest('/api/order',order,201);
+  const updateStore={name:listing.store.name,contact:'+1 809 555 0103',areas:'Cabarete',hours:'09:00–18:00',fee:100};
+  await publicRequest('/api/vendor/store',updateStore,200,vendorCookie);
+  assert.equal((await catalog()).store.fee,0);
+  assert.equal((await catalog()).store.areas,settings.areas);
+  await publicRequest('/api/admin/store/ordering',{id:settings.id,managed:false},403,vendorCookie);
+  await publicRequest('/api/vendor/order/'+orderID,{status:'out_for_delivery'},403,vendorCookie);
+  await admin('/api/admin/store/ordering',{id:settings.id,managed:false});
+  await publicRequest('/api/vendor/store',updateStore,200,vendorCookie);
+  const vendorStore=(await catalog()).store;
+  assert.equal(vendorStore.orderable,1);
+  assert.equal(vendorStore.contact,updateStore.contact);
+  const vendorPlaced=await (await publicRequest('/api/order',{...order,fee:vendorStore.fee},201)).json();
+  const {order:vendorOrder}=await (await publicRequest('/api/status/'+vendorPlaced.token)).json();
+  assert.equal(vendorOrder.nulife_managed,0);
+  await admin('/api/admin/order?id='+vendorOrder.id,{status:'confirmed'},403);
+  await publicRequest('/api/vendor/order/'+vendorOrder.id,{status:'confirmed'},200,vendorCookie);
+
+  await admin(adminOrder,{status:'delivered'},400);
+  await admin(adminOrder,{status:'delivered',weights:{[product.id]:1.25}});
+  const complete=await guestOrder();
+  assert.equal(complete.status,'delivered');
+  assert.equal(complete.total,Math.round(product.cents*1.25));
+  assert.equal(complete.contact,settings.contact);
 });

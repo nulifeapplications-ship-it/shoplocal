@@ -23,6 +23,14 @@ Type a password of at least 12 characters after the second line. Open http://loc
 3. The vendor opens the link on their phone, optionally switches to **ES**, and sets their own email and password. They fill in their delivery details and maintain their logo and products from the vendor dashboard.
 4. NuLife checks the storefront and catalog, then selects **Approve and publish**. Copy the marketplace or storefront URL from the dashboard to send it or encode it as a QR code. Subsequent routine vendor edits are public immediately. NuLife can pause a store or product independently of the vendor's own availability controls.
 
+## Manage orders on behalf of a vendor
+
+Open **Storefronts**, choose **Review**, and enable **NuLife-managed ordering**. Enter the NuLife WhatsApp number with its country code, the agreed delivery areas and hours, and the delivery fee. Enter zero for free delivery. Save the settings. Checkout opens on the approved storefront even if the vendor has no account.
+
+Open **All orders** to confirm or decline new NuLife-managed orders, enter final weights for products sold by the pound, and update delivery status. The order's private status page shows the NuLife WhatsApp number for payment coordination.
+
+When the vendor can take over, turn off the setting. NuLife can finish orders already assigned to it. New orders go to the vendor once they have an active account and delivery settings.
+
 ## Source catalogs
 
 The draft stores contain 35 Luiyi Organic Farm listings and 36 Ilia (Daja Land) listings, both with the embedded source logos. The phone numbers and Luiyi product photos associated with named products came from the respective documents. Where the price lists do not specify a sales unit, the draft uses a per-item listing with an empty package-size field. Confirm the quantities, delivery details, and current availability with each vendor before approval. Microgreens are listed as a three-pack at RD$500 and Ilia's cocoa as a fixed ¾-lb package at RD$700. Prices quoted per pound remain estimated until the vendor records the actual weight.
@@ -31,7 +39,7 @@ The draft stores contain 35 Luiyi Organic Farm listings and 36 Ilia (Daja Land) 
 
 The live marketplace runs on ChatGPT Sites. The Git repository contains the application code and draft catalogs. The hosted D1 database and credentials are managed in Sites. Guest orders and uploaded files stay in D1.
 
-Approved storefronts can be browsed as soon as they are published. Checkout opens when the vendor accepts their invitation and saves their phone number, delivery areas, hours, and a delivery fee. Enter zero for free delivery. Vendors confirm orders in their dashboard and arrange payment directly with guests.
+Approved storefronts can be browsed as soon as they are published. Checkout opens when the vendor accepts their invitation and saves their phone number, delivery areas, hours, and a delivery fee, or when NuLife enables managed ordering with those details. Enter zero for free delivery. Vendors confirm orders in their dashboard and arrange payment directly with guests.
 
 For another deployment, provision a persistent database and use HTTPS. The Node app uses SQLite, `DB_PATH` on a private persistent volume, and `SECURE_COOKIE=1` behind the HTTPS endpoint. For Sites or Cloudflare Workers, `npm run build` produces the Worker bundle. Bind D1 as `DB` and apply the migrations in order.
 

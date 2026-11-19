@@ -180,9 +180,11 @@ function parseCSV(value) {
     } catch(error) { return {line,error:error.message}; }
   });
 }
-const publicStoreColumns='id,slug,name,description,category,contact,areas,hours,fee,instructions,logo,demo';
-const liveCheckout=`stores.demo=0 AND stores.contact<>'' AND stores.areas<>'' AND stores.hours<>'' AND stores.fee IS NOT NULL
-  AND EXISTS(SELECT 1 FROM users WHERE users.store=stores.id AND users.role='vendor' AND users.demo=0)`;
+const publicStoreColumns=`id,slug,name,description,category,areas,hours,fee,instructions,logo,demo,nulife_managed,
+  CASE WHEN nulife_managed=1 THEN managed_contact ELSE contact END AS contact`;
+const liveCheckout=`stores.demo=0 AND stores.areas<>'' AND stores.hours<>'' AND stores.fee IS NOT NULL
+  AND CASE WHEN stores.nulife_managed=1 THEN stores.managed_contact<>'' ELSE stores.contact<>''
+  AND EXISTS(SELECT 1 FROM users WHERE users.store=stores.id AND users.role='vendor' AND users.demo=0) END`;
 const publicProductColumns='id,name,category,description,cents,unit,pack,photo,soldout';
 const nqty = (q,unit) => {
   const num=Number(q);
@@ -192,14 +194,36 @@ const nqty = (q,unit) => {
 const lineTotal = item => Math.round(item.cents*(item.actual??item.quantity)/1000);
 function orderData(row,isGuest=false) {
   const items=JSON.parse(row.items);
-  const {token:privateToken,attempt,...rest}=row;
+  const {token:privateToken,attempt,managed_contact,...rest}=row;
   if(isGuest) {
     delete rest.phone;
     delete rest.notes;
   }
   return {...rest,...(!isGuest?{}:{contact:row.contact}),items,total:items.reduce((sum,p)=>sum+lineTotal(p),row.fee??0),estimated:row.fee==null||items.some(p=>p.unit==='lb'&&p.actual==null)};
 }
-const joinedOrder='SELECT orders.*, stores.name AS store_name, stores.contact FROM orders JOIN stores ON stores.id=orders.store';
+const joinedOrder=`SELECT orders.*, stores.name AS store_name,
+  CASE WHEN orders.nulife_managed=1 THEN orders.managed_contact ELSE stores.contact END AS contact
+  FROM orders JOIN stores ON stores.id=orders.store`;
+async function updateOrder(db,row,v) {
+  const status=v.status||row.status;
+  required(status===row.status||statuses[row.status].includes(status),'status_change');
+  const items=JSON.parse(row.items);
+  if(v.weights!==undefined) {
+    required(v.weights && typeof v.weights==='object' && !Array.isArray(v.weights),'quantity');
+    required(!['declined','delivered'].includes(row.status),'status_change');
+    for(const [product,weight] of Object.entries(v.weights)) {
+      const item=items.find(x=>x.id===product&&x.unit==='lb');
+      const actual=nqty(weight,'lb');
+      required(item&&actual,'quantity');
+      item.actual=actual;
+    }
+  }
+  if(status==='delivered'&&items.some(x=>x.unit==='lb'&&x.actual==null)) fail('weight_required');
+  const result=await run(db,'UPDATE orders SET status=?,items=?,updated=? WHERE id=? AND store=? AND status=? AND items=?',
+    status,JSON.stringify(items),Date.now(),row.id,row.store,row.status,row.items);
+  if(result.meta.changes!==1) fail('status_change',409);
+  return json({ok:true});
+}
 function validDelivery(day,time) {
   if(!/^\d{4}-\d{2}-\d{2}$/.test(day)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return false;
   const date=new Date(day+'T'+time+':00-04:00');
@@ -337,9 +361,9 @@ async function api(req,env,path) {
     const now=Date.now();
     // Verify the catalog and store again within the insert statement.
     const conditions=items.map(()=>"(id=? AND cents=? AND unit=? AND name=? AND pack=?)").join(' OR ');
-    const result=await run(db,`INSERT OR IGNORE INTO orders (id,number,token,store,guest,phone,property,room,delivery_date,delivery_time,notes,fee,items,created,updated,attempt)
-      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
-      WHERE EXISTS (SELECT 1 FROM stores WHERE id=? AND fee IS ? AND ${checkout})
+    const result=await run(db,`INSERT OR IGNORE INTO orders (id,number,token,store,guest,phone,property,room,delivery_date,delivery_time,notes,fee,items,created,updated,attempt,nulife_managed,managed_contact)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,nulife_managed,CASE WHEN nulife_managed=1 THEN managed_contact ELSE '' END
+      FROM stores WHERE id=? AND fee IS ? AND ${checkout}
       AND (SELECT count(*) FROM products WHERE store=? AND hidden=0 AND paused=0 AND soldout=0 AND (${conditions}))=?`,
       id(),number,await digest(privateLink),store.id,guest,phone,property,room,date,time,notes,store.fee,JSON.stringify(items),now,now,attemptHash,
       store.id,store.fee,store.id,...items.flatMap(x=>[x.id,x.cents,x.unit,x.name,x.pack]),items.length);
@@ -355,13 +379,20 @@ async function api(req,env,path) {
     role(user,'vendor');
     const store=await one(db,'SELECT *, ('+checkout+') AS orderable FROM stores WHERE id=? AND '+visible,user.store);
     if(!store) fail('not_found',404);
-    if(method==='GET'&&path==='/api/vendor/store') return json({store,products:await all(db,'SELECT * FROM products WHERE store=? ORDER BY name',store.id)});
+    if(method==='GET'&&path==='/api/vendor/store') {
+      const {managed_contact,...details}=store;
+      return json({store:details,products:await all(db,'SELECT * FROM products WHERE store=? ORDER BY name',store.id)});
+    }
     if(method==='POST'&&path==='/api/vendor/store') {
       const v=await p(), name=limit(v.name,140), contact=limit(v.contact,80), feeText=String(v.fee??'').trim();
       const fee=feeText===''?null:money(feeText);
       required(name&&(!contact||cleanPhone(contact))&&(feeText===''||fee!==null),'store_fields');
       const logo=await photo(db,store.id,v.logo,v.clearLogo,store.logo);
-      await run(db,'UPDATE stores SET name=?,description=?,category=?,contact=?,areas=?,hours=?,fee=?,instructions=?,logo=? WHERE id=?',
+      await run(db,`UPDATE stores SET name=?,description=?,category=?,contact=?,
+        areas=CASE WHEN nulife_managed=1 THEN areas ELSE ? END,
+        hours=CASE WHEN nulife_managed=1 THEN hours ELSE ? END,
+        fee=CASE WHEN nulife_managed=1 THEN fee ELSE ? END,
+        instructions=?,logo=? WHERE id=?`,
         name,limit(v.description,1600),limit(v.category,80),contact,limit(v.areas,300),limit(v.hours,300),fee,limit(v.instructions,1200),logo,store.id);
       return json({ok:true});
     }
@@ -408,23 +439,8 @@ async function api(req,env,path) {
       if(!row) fail('not_found',404);
       if(method==='GET') return json({order:orderData(row)});
       if(method==='POST') {
-        const v=await p(), status=v.status||row.status;
-        required(status===row.status||statuses[row.status].includes(status),'status_change');
-        const items=JSON.parse(row.items);
-        if(v.weights!==undefined) {
-          required(v.weights && typeof v.weights==='object' && !Array.isArray(v.weights),'quantity');
-          required(!['declined','delivered'].includes(row.status),'status_change');
-          for(const [product,weight] of Object.entries(v.weights)) {
-            const item=items.find(x=>x.id===product&&x.unit==='lb');
-            const actual=nqty(weight,'lb');
-            required(item&&actual,'quantity');
-            item.actual=actual;
-          }
-        }
-        if(status==='delivered'&&items.some(x=>x.unit==='lb'&&x.actual==null)) fail('weight_required');
-        const result=await run(db,'UPDATE orders SET status=?,items=?,updated=? WHERE id=? AND store=? AND status=? AND items=?',status,JSON.stringify(items),Date.now(),row.id,store.id,row.status,row.items);
-        if(result.meta.changes!==1) fail('status_change',409);
-        return json({ok:true});
+        if(row.nulife_managed) fail('managed_order',403);
+        return updateOrder(db,row,await p());
       }
     }
   }
@@ -442,10 +458,27 @@ async function api(req,env,path) {
       const page=Math.max(0,Math.min(100000,Number(params.get('page'))||0));
       return json({orders:(await all(db,joinedOrder+' WHERE '+visible+' ORDER BY orders.created DESC LIMIT 51 OFFSET ?',Math.floor(page)*50)).map(row=>orderData(row))});
     }
-    if(method==='GET'&&path==='/api/admin/order') {
+    if(path==='/api/admin/order'&&['GET','POST'].includes(method)) {
       const row=await one(db,joinedOrder+' WHERE orders.id=? AND '+visible,params.get('id'));
       if(!row) fail('not_found',404);
-      return json({order:orderData(row)});
+      if(method==='GET') return json({order:orderData(row)});
+      if(!row.nulife_managed) fail('forbidden',403);
+      return updateOrder(db,row,await p());
+    }
+    if(method==='POST'&&path==='/api/admin/store/ordering') {
+      const v=await p(), store=limit(v.id,75);
+      required(typeof v.managed==='boolean');
+      let result;
+      if(v.managed) {
+        const contact=limit(v.contact,80), areas=limit(v.areas,300), hours=limit(v.hours,300), fee=money(v.fee);
+        required(cleanPhone(contact)&&areas&&hours&&fee!==null,'managed_fields');
+        result=await run(db,'UPDATE stores SET nulife_managed=1,managed_contact=?,areas=?,hours=?,fee=? WHERE id=? AND '+visible,
+          contact,areas,hours,fee,store);
+      } else {
+        result=await run(db,'UPDATE stores SET nulife_managed=0 WHERE id=? AND '+visible,store);
+      }
+      if(result.meta.changes!==1) fail('not_found',404);
+      return json({ok:true});
     }
     if(method==='POST'&&path==='/api/admin/invite') {
       const v=await p(), name=limit(v.name,140);

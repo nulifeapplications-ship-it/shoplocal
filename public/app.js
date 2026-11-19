@@ -58,6 +58,8 @@ function errorText(error) {
     account_exists:L('This store already has an account.','Esta tienda ya tiene una cuenta.'),
     product_fields:L('Enter a product name, a valid price and unit. Use true or false for availability flags.','Ingresa un nombre, un precio y una unidad válidos. Usa true o false para las opciones de disponibilidad.'),
     store_fields:L('Enter a store name and a valid phone number and fee if provided.','Ingresa el nombre de la tienda y un teléfono y tarifa válidos si los incluyes.'),
+    managed_fields:L('Enter a NuLife WhatsApp number, delivery areas, hours and a delivery fee.','Ingresa un número de WhatsApp de NuLife, las zonas de entrega, el horario y la tarifa.'),
+    managed_order:L('NuLife is handling this order.','NuLife está gestionando este pedido.'),
     product_code:L('Use letters, numbers, hyphens, periods or underscores in the code.','Usa letras, números, guiones, puntos o guiones bajos en el código.'),
     duplicate_code:L('This product code is repeated.','El código de producto está repetido.'),
     csv_header:L('Use the exact column headers from the template.','Usa los encabezados exactos de la plantilla.'),
@@ -183,14 +185,16 @@ function validQuantity(value,unit) {return value>0&&value<=1000&&Math.round(valu
 function storefront({store:s,products}) {
   const info=[
    [L('Delivery areas','Zonas de entrega'),s.areas],[L('Hours','Horario'),s.hours],
-   [L('Delivery fee','Tarifa de entrega'),deliveryFee(s.fee)],[L('Contact','Contacto'),s.contact],
+   [L('Delivery fee','Tarifa de entrega'),deliveryFee(s.fee)],[s.nulife_managed?L('NuLife WhatsApp','WhatsApp de NuLife'):L('Contact','Contacto'),s.contact],
    [L('Ordering instructions','Instrucciones para pedidos'),s.instructions]
   ];
   const link=location.origin+'/store/'+s.slug;
   main.innerHTML=page(back('/',L('Marketplace','Mercado'))+
     '<div class="store-hero">'+(s.logo?image(s.logo,'store-logo',s.name):'')+'<div>'+(s.category?'<span class="location">'+E(category(s.category))+'</span>':'')+
     heading(E(s.name))+(s.description?'<p>'+E(human(s.description))+'</p>':'')+'</div>'+btn(icon('share')+' '+L('Copy store link','Copiar enlace de tienda'),'secondary','data-copy="'+E(link)+'"')+'</div>',
-    (s.demo?sampleBanner():'')+(s.orderable?'':'<p class="banner sample-notice">'+E(errorText(new Error('ordering_closed')))+'</p>')+panel(L('Delivery details','Detalles de entrega'),'<dl class="info-grid">'+info.filter(x=>x[1]).map(([label,value])=>'<div><dt>'+label+'</dt><dd>'+E(value)+'</dd></div>').join('')+'</dl>')+
+    (s.demo?sampleBanner():'')+(s.orderable
+      ?s.nulife_managed?'<p class="banner sample-notice">'+L('NuLife handles orders for this store.','NuLife gestiona los pedidos de esta tienda.')+'</p>':''
+      :'<p class="banner sample-notice">'+E(errorText(new Error('ordering_closed')))+'</p>')+panel(L('Delivery details','Detalles de entrega'),'<dl class="info-grid">'+info.filter(x=>x[1]).map(([label,value])=>'<div><dt>'+label+'</dt><dd>'+E(value)+'</dd></div>').join('')+'</dl>')+
     '<section class="products"><h2 class="section-title">'+L('Shop the catalog','Compra en el catálogo')+'</h2><div class="grid products">'+products.map(product=>productCard(product,s.orderable)).join('')+
     '</div>'+(!products.length?'<p class="empty">'+L('This store has no products available yet.','Esta tienda aún no tiene productos disponibles.')+'</p>':'')+'</section>',true);
   main.querySelectorAll('.product-order').forEach(form=>submit(form,data=>{
@@ -210,7 +214,7 @@ function storefront({store:s,products}) {
       if(cart.items.length>=16) throw new Error('cart');
       cart.items.push({...product,quantity});
     }
-    Object.assign(cart,{store:s.id,slug:s.slug,name:s.name,fee:s.fee,demo:s.demo,orderable:Boolean(s.orderable),attempt:crypto.randomUUID()});
+    Object.assign(cart,{store:s.id,slug:s.slug,name:s.name,fee:s.fee,demo:s.demo,managed:Boolean(s.nulife_managed),orderable:Boolean(s.orderable),attempt:crypto.randomUUID()});
     persistCart();toast(L('Added to cart','Agregado al carrito'));
   }));
 }
@@ -228,7 +232,7 @@ function costs(items,fee,estimated,total) {
     (p.actual!=null?'<p class="hint">'+L('Final weight','Peso final')+' '+E(p.actual)+' '+units('lb')+'</p>':'')+'</div><strong>'+money(Math.round((p.actual??p.quantity)*p.cents))+'</strong></div>').join('')+
     '<div class="row"><span>'+L('Delivery','Entrega')+'</span><strong>'+(fee==null?L('To be confirmed','Por confirmar'):money(fee))+'</strong></div>'+
     '<div class="row order-total"><strong>'+(estimated?L('Estimated total','Total estimado'):L('Total','Total'))+'</strong><strong>'+money(total)+'</strong></div></div>'+
-    (items.some(p=>p.unit==='lb'&&p.actual==null)?'<p class="hint">'+L('The vendor will update the amount using the actual weight.','El comercio actualizará el importe con el peso real.')+'</p>':'');
+    (items.some(p=>p.unit==='lb'&&p.actual==null)?'<p class="hint">'+L('The amount will be updated using the actual weight.','El importe se actualizará según el peso real.')+'</p>':'');
 }
 function cartScreen() {
   const title=heading(L('Your cart','Tu carrito'));
@@ -249,7 +253,7 @@ function cartScreen() {
     input('date',L('Preferred date','Fecha preferida'),'','required type="date" min="'+today()+'"')+
     input('time',L('Preferred time (local)','Hora preferida (local)'),'','required type="time"')+
     area('notes',L('Notes (optional)','Notas (opcional)'))+'</div>'+
-    '<p class="hint">'+L('You will arrange payment directly with the vendor.','Coordinarás el pago directamente con el comercio.')+'</p>'+
+    '<p class="hint">'+(cart.managed?L('NuLife will coordinate your order and payment.','NuLife coordinará tu pedido y el pago.'):L('You will arrange payment directly with the vendor.','Coordinarás el pago directamente con el comercio.'))+'</p>'+
     (fee===null?'<p class="hint">'+L('Confirm any delivery fee with the vendor.','Confirma la tarifa de entrega con el comercio.')+'</p>':'')+
     btn(L('Place order','Hacer pedido'))+'</form>':'<p class="banner">'+E(errorText(new Error('ordering_closed')))+'</p>';
   main.innerHTML=page(back('/store/'+cart.slug,L('Continue shopping','Seguir comprando'))+title,(cart.demo?sampleBanner():'')+
@@ -266,7 +270,7 @@ function cartScreen() {
         const latest=products.find(p=>p.id===item.id&&!p.soldout&&validQuantity(item.quantity,p.unit));
         return latest?[{...latest,quantity:item.quantity}]:[];
       });
-      cart.fee=store.fee;cart.orderable=Boolean(store.orderable);cart.attempt=crypto.randomUUID();persistCart();cartScreen();toast(L('Cart updated','Carrito actualizado'));
+      cart.fee=store.fee;cart.managed=Boolean(store.nulife_managed);cart.orderable=Boolean(store.orderable);cart.attempt=crypto.randomUUID();persistCart();cartScreen();toast(L('Cart updated','Carrito actualizado'));
     } catch(e) {toast(errorText(e));}
   };
   if(!canOrder) return;
@@ -279,7 +283,9 @@ function cartScreen() {
 }
 function payment(o) {
   const number=o.contact?.replace(/\D/g,'');
-  return '<p>'+E(L('Arrange payment directly with '+o.store_name+'.','Coordina el pago directamente con '+o.store_name+'.'))+'</p>'+
+  const instructions=o.nulife_managed?L('Contact NuLife to coordinate payment.','Contacta a NuLife para coordinar el pago.')
+    :L('Arrange payment directly with '+o.store_name+'.','Coordina el pago directamente con '+o.store_name+'.');
+  return '<p>'+E(instructions)+'</p>'+
     (number?'<a class="whatsapp" rel="noopener noreferrer" target="_blank" href="https://wa.me/'+E(number)+'?text='+encodeURIComponent(L('Hello, my order number is ','Hola, mi número de pedido es ')+o.number)+'">WhatsApp</a>':'');
 }
 function orderSummary(o) {
@@ -354,17 +360,19 @@ async function phoneImage(file) {
   finally {URL.revokeObjectURL(url);}
 }
 function vendorStore(s) {
+  const deliveryLocked=s.nulife_managed?'disabled':'';
   const fields=input('name',L('Store name','Nombre de la tienda'),s.name,'required maxlength="140"')+
     input('category',L('Store category','Categoría de la tienda'),s.category,'list="store-categories"')+
     '<datalist id="store-categories">'+Object.entries(categories()).map(([id,name])=>choice(id,name)).join('')+'</datalist>'+
     area('description',L('Store description','Descripción de la tienda'),s.description)+
     input('contact',L('WhatsApp or phone','WhatsApp o teléfono'),s.contact,'type="tel"')+
-    input('areas',L('Delivery areas','Zonas de entrega'),s.areas)+
-    input('hours',L('Delivery hours','Horario de entrega'),s.hours)+
-    input('fee',L('Delivery fee (RD$)','Tarifa de entrega (RD$)'),s.fee==null?'':s.fee/100,'type="number" min="0" step="0.01"')+
+    input('areas',L('Delivery areas','Zonas de entrega'),s.areas,deliveryLocked)+
+    input('hours',L('Delivery hours','Horario de entrega'),s.hours,deliveryLocked)+
+    input('fee',L('Delivery fee (RD$)','Tarifa de entrega (RD$)'),s.fee==null?'':s.fee/100,'type="number" min="0" step="0.01" '+deliveryLocked)+
     area('instructions',L('Ordering instructions','Instrucciones para pedidos'),s.instructions)+imageField('logo',L('Store logo','Logo de la tienda'),s.logo);
   const share=s.approved&&!s.paused?panel(L('Public storefront','Tienda pública'),shareBox(location.origin+'/store/'+s.slug,true)):'';
   return '<div class="stack">'+share+panel(L('Store details','Datos de la tienda'),'<form id="store-form" class="form">'+errorBox+
+    (s.nulife_managed?'<p class="banner">'+L('NuLife manages delivery settings for this storefront.','NuLife gestiona los ajustes de entrega de esta tienda.')+'</p>':'')+
     '<div class="form-grid">'+fields+'</div>'+btn(L('Save storefront','Guardar tienda'))+'</form>')+'</div>';
 }
 function productEditor(p={}) {
@@ -440,9 +448,10 @@ function vendorConnect(data,tab) {
     csvPreview(await api('/vendor/csv',{csv:csvFile}));
   });
 }
+const managedLabel=()=>L('Managed by NuLife','Gestionado por NuLife');
 function ordersList(orders,admin) {
   return panel(L('Orders','Pedidos'),'<div class="rows">'+orders.slice(0,50).map(o=>'<div class="row"><div><strong>'+E(o.number)+'</strong><p class="hint">'+
-    E(o.guest)+(admin?' · '+E(o.store_name):'')+' · '+E(formatDate(o.created))+'</p></div><div class="actions">'+status(o.status)+
+    E(o.guest)+(admin?' · '+E(o.store_name):'')+(o.nulife_managed?' · '+managedLabel():'')+' · '+E(formatDate(o.created))+'</p></div><div class="actions">'+status(o.status)+
     '<a class="button secondary small" href="#order/'+E(o.id)+'">'+L('View order','Ver pedido')+'</a></div></div>').join('')+
     (!orders.length?'<p class="empty">'+L('No orders on this page.','No hay pedidos en esta página.')+'</p>':'')+'</div><div class="actions">'+
     (orderPage?btn(L('Previous orders','Pedidos anteriores'),'secondary small','data-order-page="'+(orderPage-1)+'"'):'')+
@@ -451,9 +460,10 @@ function ordersList(orders,admin) {
 function orderDetails(o,admin) {
   const phone=o.phone.replace(/\D/g,'');
   const weights=o.items.filter(p=>p.unit==='lb');
-  const editable=!admin&&transitions[o.status].length>0;
+  const editable=admin===Boolean(o.nulife_managed)&&transitions[o.status].length>0;
   return '<div class="stack">'+back('#orders',L('All orders','Todos los pedidos'))+
     panel(E(o.number),'<div class="stack"><div class="split"><strong>'+E(o.store_name)+'</strong>'+status(o.status)+'</div>'+
+    (o.nulife_managed?'<p class="hint">'+managedLabel()+'</p>':'')+
     '<dl class="info-grid">'+[
       [L('Guest','Huésped'),E(o.guest)],[L('WhatsApp','WhatsApp'),'<a class="whatsapp" rel="noopener noreferrer" target="_blank" href="https://wa.me/'+E(phone)+'">'+E(o.phone)+'</a>'],
       [L('Property','Propiedad'),E(o.property)+' · '+E(o.room)],[L('Preferred delivery','Entrega preferida'),E(formatDate(new Date(o.delivery_date+'T'+o.delivery_time+':00-04:00')))],
@@ -465,12 +475,13 @@ function orderDetails(o,admin) {
       '<label>'+L('Order status','Estado del pedido')+'<select name="status">'+[o.status,...transitions[o.status]].map(s=>choice(s,statusName(s),o.status)).join('')+'</select></label>'+
       btn(L('Save update','Guardar cambios'))+'</form>'):'')+'</div>';
 }
-function connectOrder() {
+function connectOrder(admin=false) {
   main.querySelectorAll('[data-order-page]').forEach(b=>b.onclick=()=>{orderPage=Number(b.dataset.orderPage);render();});
   if(q('#update-order')) submit(q('#update-order'),async form=>{
     const weights={};
     for(const [key,value] of form) if(key.startsWith('weight-')&&value!=='') weights[key.slice(7)]=Number(value);
-    await api('/vendor/order/'+encodeURIComponent(location.hash.slice(7)),{status:form.get('status'),...(Object.keys(weights).length?{weights}:{})});
+    const orderID=encodeURIComponent(location.hash.slice(7));
+    await api(admin?'/admin/order?id='+orderID:'/vendor/order/'+orderID,{status:form.get('status'),...(Object.keys(weights).length?{weights}:{})});
     await render();toast(L('Order updated','Pedido actualizado'));
   });
 }
@@ -492,10 +503,23 @@ function adminStores(stores) {
     '<form class="form" id="invite-form">'+errorBox+input('name',L('Vendor or store name','Nombre del comercio o tienda'),'','required maxlength="140"')+
     '<div class="actions">'+btn(L('Create invitation','Crear invitación'))+'</div></form><div class="subtle" id="invite-result"></div>')+
     panel(L('Storefronts','Tiendas'),'<div class="rows">'+stores.map(s=>'<div class="row"><div><strong>'+E(s.name)+'</strong><p class="hint">'+
-      (s.demo?L('Sample storefront','Tienda de ejemplo'):s.account?L('Vendor account active','Cuenta activa'):L('No vendor account yet','Aún sin cuenta'))+
+      (s.nulife_managed?managedLabel():s.demo?L('Sample storefront','Tienda de ejemplo'):s.account?L('Vendor account active','Cuenta activa'):L('No vendor account yet','Aún sin cuenta'))+
       '</p></div><div class="actions">'+storeBadge(s)+'<a class="button secondary small" href="#review/'+E(s.id)+'">'+L('Review','Revisar')+'</a></div></div>').join('')+
       (stores.length?'':'<p class="empty">'+L('No storefronts yet.','Aún no hay tiendas.')+'</p>')+'</div>')+
     panel(L('Marketplace link','Enlace del mercado'),shareBox(location.origin+'/',true))+'</div>';
+}
+function managedOrdering(s) {
+  const fields=input('contact',L('NuLife WhatsApp with country code','WhatsApp de NuLife con código de país'),s.managed_contact,'type="tel" required')+
+    input('areas',L('Delivery areas','Zonas de entrega'),s.areas,'required maxlength="300"')+
+    input('hours',L('Delivery hours','Horario de entrega'),s.hours,'required maxlength="300"')+
+    input('fee',L('Delivery fee (RD$)','Tarifa de entrega (RD$)'),s.fee==null?'':s.fee/100,'type="number" min="0" step="0.01" required');
+  return panel(L('NuLife-managed ordering','Pedidos gestionados por NuLife'),'<form id="managed-ordering" class="form">'+errorBox+
+    '<p>'+L('Enable this to confirm and update orders on behalf of the vendor.','Activa esta opción para confirmar y actualizar pedidos en nombre del comercio.')+'</p>'+
+    check('managed',L('Enable NuLife-managed ordering','Activar pedidos gestionados por NuLife'),s.nulife_managed)+
+    '<fieldset class="managed-fields" '+(s.nulife_managed?'':'hidden disabled')+'><div class="form-grid">'+fields+'</div>'+
+    '<p class="hint">'+L('Guests see these details. Enter 0 for free delivery.','Los huéspedes verán estos datos. Ingresa 0 para entrega gratis.')+'</p></fieldset>'+
+    (s.nulife_managed?'<p class="hint">'+L('Turning this off changes who handles new orders. NuLife can still finish orders already assigned to it.','Desactivar esta opción cambia quién gestiona los pedidos nuevos. NuLife puede terminar los pedidos que ya tiene asignados.')+'</p>':'')+
+    btn(L('Save ordering settings','Guardar ajustes de pedidos'))+'</form>');
 }
 function adminReview(s,products) {
   const top='<div class="split"><div><h2>'+E(s.name)+'</h2>'+storeBadge(s)+'</div>'+(s.logo?image(s.logo,'large-logo',s.name):'')+'</div>'+
@@ -505,12 +529,12 @@ function adminReview(s,products) {
     ].map(([label,text])=>'<div><dt>'+label+'</dt><dd>'+E(human(text)||'—')+'</dd></div>').join('')+'</dl>';
   const button=(text,action,id,style='secondary')=>btn(text,style+' small','data-mod="'+action+'" data-id="'+E(id)+'"');
   return '<div class="stack">'+back('#stores',L('All storefronts','Todas las tiendas'))+
-    panel('',top+(s.id.startsWith('draft-')?'<p class="banner">'+L('Confirm package sizes where the source list omitted them, and verify delivery details before publishing.','Confirma las presentaciones que faltan en la lista de precios y verifica los datos de entrega antes de publicar.')+'</p>':'')+'<div class="actions">'+
+    panel('',top+(s.id.startsWith('draft-')?'<p class="banner">'+L('Confirm package sizes where the source list omitted them, and verify delivery details before opening checkout.','Confirma las presentaciones que faltan en la lista de precios y verifica los datos de entrega antes de activar los pedidos.')+'</p>':'')+'<div class="actions">'+
     (!s.approved?button(L('Approve and publish','Aprobar y publicar'),'approve',s.id,''):'')+
     button(s.paused?L('Resume store','Reactivar tienda'):L('Pause store','Pausar tienda'),s.paused?'resume_store':'pause_store',s.id)+
     btn(L('Invite to this storefront','Invitar a esta tienda'),'secondary small','id="invite-existing" data-id="'+E(s.id)+'"')+'</div><div class="subtle" id="invite-result"></div>')+
     (s.approved&&!s.paused?panel(L('Storefront link','Enlace de la tienda'),shareBox(location.origin+'/store/'+s.slug,true)):'')+
-    panel(L('Catalog review','Revisión del catálogo'),'<div class="rows">'+products.map(p=>'<div class="row"><div>'+
+    managedOrdering(s)+panel(L('Catalog review','Revisión del catálogo'),'<div class="rows">'+products.map(p=>'<div class="row"><div>'+
       (p.photo?image(p.photo,'large-logo'):'')+'<strong>'+E(human(p.name))+'</strong><p class="hint">'+E(p.code)+' · '+money(p.cents)+' / '+E(unitName(p))+
       (p.category?' · '+E(category(p.category)):'')+'</p>'+(p.description?'<p class="hint">'+E(human(p.description))+'</p>':'')+
       '<p class="hint">'+(p.hidden?L('Hidden','Oculto')+' · ':'')+(p.soldout?L('Sold out','Agotado')+' · ':'')+(p.paused?L('Paused by NuLife','Pausado por NuLife'):'')+'</p></div>'+
@@ -523,7 +547,16 @@ function adminDashboard(data) {
   const tabs=portalNav([['stores',L('Storefronts','Tiendas')],['orders',L('All orders','Todos los pedidos')]],['orders','order'].includes(tab)?'orders':'stores');
   const body=tab==='review'?adminReview(data.store,data.products):tab==='order'?orderDetails(data.order,true):tab==='orders'?ordersList(data.orders,true):adminStores(data.stores);
   main.innerHTML=page(accountHeading(L('NuLife administration','Administración de NuLife'),''),tabs+body,true);
-  connectPortal();connectOrder();
+  connectPortal();connectOrder(true);
+  const managedForm=q('#managed-ordering');
+  if(managedForm) {
+    const toggle=q('[name=managed]',managedForm), fields=q('.managed-fields',managedForm);
+    toggle.onchange=()=>{fields.hidden=!toggle.checked;fields.disabled=!toggle.checked;};
+    submit(managedForm,async form=>{
+      await api('/admin/store/ordering',{...Object.fromEntries(form),id:data.store.id,managed:form.has('managed')});
+      await render();toast(L('Ordering settings saved','Ajustes de pedidos guardados'));
+    });
+  }
   if(q('#invite-form')) submit(q('#invite-form'),async form=>{
     q('#invite-result').innerHTML=inviteBox(await api('/admin/invite',{name:form.get('name')}));
     q('#invite-form').reset();
@@ -559,6 +592,7 @@ async function render() {
           throw error;
         });
         cart.orderable=Boolean(store?.orderable);
+        cart.managed=Boolean(store?.nulife_managed);
       }
       if(current())cartScreen();
     }
