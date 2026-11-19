@@ -1,4 +1,4 @@
-const version='nulife-offline-1';
+const version='nulife-offline-2';
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(version).then(cache=>cache.addAll(['/offline.html','/icon-192.png'])));
   self.skipWaiting();
